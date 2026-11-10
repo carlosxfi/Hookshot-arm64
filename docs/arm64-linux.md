@@ -72,7 +72,11 @@ compute shaders.
 
 While copies are active, VRAM mirrors, asynchronous replay, parallel recording, recording chunks, queue bursts and
 batched submissions are disabled. Event waits between game queues still keep their normal ordering.
-Whole game pools are allocated ahead of recording to keep one GPU buffer per guest page. The GPU allocation and
+Overlapping address ranges are planned before drawing, but GPU copies are allocated only when a buffer is actually
+used. Partial buffers from an older plan are retired before any draw can name them. This avoids copying thousands
+of unused texture allocations while keeping one GPU buffer per guest page. Retired copies are not scanned again.
+The first twelve submits and then every 120th log the live buffer count/MB and upload, GPU and read-back times.
+The GPU allocation and
 its CPU comparison baseline add roughly twice the copied pool bytes to the game's memory use. Full page scans and
 GPU waits can substantially reduce frame rate; this is an experimental compatibility path, not a performance result.
 An available DMA import that subsequently fails for a specific pool is still reported, not mixed with copy storage.

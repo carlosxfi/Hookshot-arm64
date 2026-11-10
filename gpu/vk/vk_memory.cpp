@@ -85,6 +85,7 @@ struct GuestPool {
 };
 
 std::vector<GuestPool> guest_pools;   // by lo, from the host
+std::vector<GuestPool> copy_ranges;  // Disjoint address plans, without allocating unused game pools.
 std::atomic<uint64_t> guest_pools_gen{1};   // (bumped when that table is replaced: a span cached without the lock goes stale)
 std::map<uint64_t, Pool> imported;    // by lo, made on first use
 Pool* last_pool = nullptr;            // (the last pool_of hit: draws in a row bind buffers of the same pools)
@@ -1872,6 +1873,35 @@ void prefetch_chunks(uint64_t lo, uint64_t hi, uint64_t chunk) {
 
 /// (imports by 16 MB chunk (RX_VK_IMPORT_CHUNK_MB), not by pool: each import cost 5-45 ms in the driver, more as their
 /// number grew, and the game makes ~13 pools a second; a chunk covers the pools after it at no cost)
+void copy_plan_pools() { // pools_mu held; the preceding copied recording has already completed on the GPU.
+    copy_ranges = guest_pools;
+    for (const auto& [lo, p] : imported) copy_ranges.push_back({p.lo, p.hi});
+    std::sort(copy_ranges.begin(), copy_ranges.end(), [](const GuestPool& a, const GuestPool& b) { return a.lo < b.lo; });
+    size_t n = 0;
+    for (const GuestPool r : copy_ranges) {
+        if (n && r.lo < copy_ranges[n - 1].hi)
+            copy_ranges[n - 1].hi = std::max(copy_ranges[n - 1].hi, r.hi);
+        else
+            copy_ranges[n++] = r;
+    }
+    copy_ranges.resize(n);
+    // An old buffer that covers only part of a newly merged component must leave before ANY draw binds it.
+    // Otherwise a later binding could merge it after earlier commands had already named the old buffer.
+    for (auto it = imported.begin(); it != imported.end();) {
+        auto range = std::upper_bound(copy_ranges.begin(), copy_ranges.end(), it->second.lo,
+                                      [](uint64_t a, const GuestPool& p) { return a < p.lo; });
+        if (range != copy_ranges.begin()) {
+            --range;
+            if (range->lo != it->second.lo || range->hi != it->second.hi) {
+                auto old = it++;
+                retire_pool(old);
+                continue;
+            }
+        }
+        ++it;
+    }
+}
+
 uint64_t import_chunk() {
     if (guest_copy_mode) return 0; // Whole game pools: chunk merges must not produce two copies of the same guest pages.
     static const uint64_t chunk = (uint64_t)(getenv("RX_VK_IMPORT_CHUNK_MB") ? std::max(0, atoi(getenv("RX_VK_IMPORT_CHUNK_MB"))) : 16) << 20;
@@ -1915,7 +1945,15 @@ Pool* pool_lookup(uint64_t guest, uint64_t size) {
     --it;
     if (guest < it->lo || guest >= it->hi || !size || size > it->hi - guest) return nullptr;
     const uint64_t chunk = import_chunk();
-    const GuestPool range = chunk ? GuestPool{guest, guest + size} : *it;
+    GuestPool range = chunk ? GuestPool{guest, guest + size} : *it;
+    if (guest_copy_mode) {
+        auto planned = std::upper_bound(copy_ranges.begin(), copy_ranges.end(), range.lo,
+                                        [](uint64_t a, const GuestPool& p) { return a < p.lo; });
+        if (planned != copy_ranges.begin()) {
+            --planned;
+            if (planned->lo <= range.lo && planned->hi >= range.hi) range = *planned;
+        }
+    }
     auto covering = [&]() {
         auto c = imported.upper_bound(range.lo);
         if (c == imported.begin()) return imported.end();
@@ -2896,10 +2934,10 @@ void memory_begin_submission() {
     writebacks.clear();
     imports_give_back();
     if (guest_copy_mode) {
-        // Resolve overlaps before recording any draw. Imported pointers alias naturally, but two copied
-        // buffers do not: merging a pool after earlier commands had written the old buffer would lose those
-        // writes in subsequent commands. Whole pools, eagerly coalesced here, keep one buffer per guest page.
-        for (const auto& p : guest_pools) pool_lookup(p.lo, p.hi - p.lo);
+        // Plan overlaps before recording, but allocate only pools actually used as GPU buffers. Eager copies
+        // included the game's multi-GB texture pools and thousands of tiny unused allocations; scanning all
+        // of those around every submit reduced the Odin's boot sequence to approximately 0.3 fps.
+        copy_plan_pools();
     }
     if (tex_capture_on()) publish_tex_spans(texture_frame_no());
     if (!mirror_on()) return;
@@ -3488,16 +3526,25 @@ void memory_stats(int64_t* mirrors, uint64_t* mirror_mb, int64_t* sync_bytes, in
 namespace mkwvk {
 bool memory_guest_copy() { return guest_copy_mode; }
 
-// Called by the serialized replay with no GPU work using these buffers in flight. Imports can be retired
-// during recording, so include both tables. No worker can create or edit a copy concurrently.
+// Only live copies: planning retires incomplete components before any draw, and each preceding recording's
+// GPU writes were already copied back at its fence. Scanning retired copies would touch unused guest pages.
 template<class F> void for_copy_pools(F f) {
-    for (auto& node : retired_pools) if (node.mapped().copy) f(node.mapped());
     for (auto& [lo, p] : imported) if (p.copy) f(p);
 }
+std::chrono::steady_clock::time_point copy_submit_start;
+double copy_upload_ms = 0;
+uint64_t copy_live_bytes = 0, copy_live_pools = 0;
 void memory_copy_before_submit(VkCommandBuffer cmd) {
     if (!guest_copy_mode) return;
+    copy_submit_start = std::chrono::steady_clock::now();
+    copy_live_bytes = copy_live_pools = 0;
     std::lock_guard lk(pools_mu);
-    for_copy_pools([](Pool& p) { p.copy->upload(p.copy_map, host->guest_base() + p.lo); });
+    for_copy_pools([](Pool& p) {
+        copy_live_bytes += p.hi - p.lo;
+        ++copy_live_pools;
+        p.copy->upload(p.copy_map, host->guest_base() + p.lo);
+    });
+    copy_upload_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - copy_submit_start).count();
     // Coherent host writes become available through queue submission. GPU writes additionally need an
     // explicit dependency to HOST_READ, then a successful fence, before the CPU can copy the results back.
     VkMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
@@ -3512,6 +3559,7 @@ void memory_copy_before_submit(VkCommandBuffer cmd) {
 }
 void memory_copy_after_submit() {
     if (!guest_copy_mode) return;
+    const auto t0 = std::chrono::steady_clock::now();
     std::lock_guard lk(pools_mu);
     for_copy_pools([](Pool& p) {
         p.copy->download(host->guest_base() + p.lo, p.copy_map, [&](size_t offset, size_t size) {
@@ -3521,5 +3569,14 @@ void memory_copy_after_submit() {
             wb_pages_note(p.lo + offset, p.lo + offset + size, mem_rec_value);
         });
     });
+    const auto t1 = std::chrono::steady_clock::now();
+    static uint64_t count = 0;
+    if (++count <= 12 || count % 120 == 0) {
+        const double total = std::chrono::duration<double, std::milli>(t1 - copy_submit_start).count();
+        const double download = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        logf("vk: guest copy submit %llu: %llu live buffers, %.1f MB scanned; upload %.1f ms, GPU+submit %.1f ms, read-back %.1f ms",
+             (unsigned long long)count, (unsigned long long)copy_live_pools, copy_live_bytes / 1048576.0,
+             copy_upload_ms, std::max(0.0, total - copy_upload_ms - download), download);
+    }
 }
 } // namespace mkwvk

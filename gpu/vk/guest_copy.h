@@ -17,8 +17,8 @@ public:
         before.resize(size);
         writes.clear();
         if (!size) return;
-        std::memcpy(mapped, guest, size);
-        std::memcpy(before.data(), mapped, size);
+        std::memcpy(before.data(), guest, size);
+        std::memcpy(mapped, before.data(), size);
     }
     void note_write(size_t offset, size_t size) {
         if (offset >= before.size() || !size) return;
@@ -31,8 +31,10 @@ public:
         for (size_t at = 0; at < before.size(); at += 4096) {
             const size_t n = std::min<size_t>(4096, before.size() - at);
             if (!std::memcmp(guest + at, before.data() + at, n)) continue;
-            std::memcpy(mapped + at, guest + at, n);
-            std::memcpy(before.data() + at, mapped + at, n);
+            // Capture once into cached CPU memory, then upload those same bytes. Reading the mapped GPU
+            // allocation back just to build this baseline is especially expensive on uncached ARM mappings.
+            std::memcpy(before.data() + at, guest + at, n);
+            std::memcpy(mapped + at, before.data() + at, n);
             bytes += n;
         }
         return bytes;
