@@ -52,8 +52,10 @@ public:
             while (i < writes.size() && writes[i].lo <= r.hi) r.hi = std::max(r.hi, writes[i++].hi);
             // Known stores must win even when they wrote their previous value. Read-only storage is neither
             // compared nor copied. The renderer must select full diff scanning for unbounded pointer stores.
-            std::memcpy(guest + r.lo, mapped + r.lo, r.hi - r.lo);
             std::memcpy(before.data() + r.lo, mapped + r.lo, r.hi - r.lo);
+            // Read the GPU mapping once; publish the same cached snapshot to guest memory.
+            // ARM mappings may be uncached, making a second read of a large binding costly.
+            std::memcpy(guest + r.lo, before.data() + r.lo, r.hi - r.lo);
             written(r.lo, r.hi - r.lo);
             bytes += r.hi - r.lo;
         }
