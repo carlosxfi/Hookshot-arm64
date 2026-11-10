@@ -106,6 +106,42 @@ int main() {
     assert(marked == 3 && tg[3] == 10 && tg[4] == 55 && tg[100] == 88);
     assert(tracked.download_tracked(tg.data(), tm.data(), [](size_t, size_t) { assert(false); }) == 0);
     assert(tracked.upload_range(tm.data(), tg.data(), 0, 4096) == 4096 && tm[100] == 88);
+    // A wide writable descriptor with no actual changes must not invalidate any guest pages.
+    tracked.note_write(0, N);
+    assert(tracked.download_tracked(tg.data(), tm.data(), [](size_t, size_t) { assert(false); }) == N);
+    // GPU stores of unchanged values still win against concurrent CPU edits inside the binding.
+    tg[4096] = 77;
+    tracked.note_write(0, N);
+    marked = 0;
+    tracked.download_tracked(tg.data(), tm.data(), [&](size_t lo, size_t n) {
+        assert(lo == 4096 && n == 4096); marked += n;
+    });
+    assert(marked == 4096 && tg[4096] == 11);
+    // A partial first/last page may not publish outside its binding, even when neighbours differ.
+    tg[4093] ^= 1; tg[4100] ^= 1;
+    const auto left = tg[4093], right = tg[4100];
+    tm[4095] ^= 1; tm[4096] ^= 1;
+    tracked.note_write(4094, 6);
+    marked = 0;
+    tracked.download_tracked(tg.data(), tm.data(), [&](size_t lo, size_t n) {
+        assert((lo == 4094 && n == 2) || (lo == 4096 && n == 4)); marked += n;
+    });
+    assert(marked == 6 && tg[4093] == left && tg[4100] == right);
+    assert(tg[4095] == tm[4095] && tg[4096] == tm[4096]);
+    // Reference model for merged wide writes, sparse GPU changes, and racing CPU data.
+    for (int submit = 0; submit < 80; ++submit) {
+        tracked.upload(tm.data(), tg.data());
+        for (int j = 0; j < 20; ++j) tg[rng() % N] = uint8_t(rng());
+        for (int j = 0; j < 20; ++j) tm[rng() % N] = uint8_t(rng());
+        model = tg;
+        for (int j = 0; j < 8; ++j) {
+            const size_t lo = rng() % N, n = std::min<size_t>(rng() % 5000, N - lo);
+            tracked.note_write(lo, n);
+            std::copy(tm.begin() + lo, tm.begin() + lo + n, model.begin() + lo);
+        }
+        tracked.download_tracked(tg.data(), tm.data(), [](size_t, size_t) {});
+        assert(tg == model);
+    }
 }
 '''
 

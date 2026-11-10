@@ -3,6 +3,7 @@
 // Inspired by TotK's shadow storage (see host/ARM64_PROVENANCE.md); this implementation is specific to Hookshot.
 #pragma once
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -46,17 +47,28 @@ public:
     }
     template<class Written> uint64_t download_tracked(uint8_t* guest, const uint8_t* mapped, Written written) {
         uint64_t bytes = 0;
+        std::array<uint8_t, 4096> snapshot;
         std::sort(writes.begin(), writes.end(), [](Range a, Range b) { return a.lo < b.lo; });
         for (size_t i = 0; i < writes.size();) {
             Range r = writes[i++];
             while (i < writes.size() && writes[i].lo <= r.hi) r.hi = std::max(r.hi, writes[i++].hi);
             // Known stores must win even when they wrote their previous value. Read-only storage is neither
             // compared nor copied. The renderer must select full diff scanning for unbounded pointer stores.
-            std::memcpy(before.data() + r.lo, mapped + r.lo, r.hi - r.lo);
-            // Read the GPU mapping once; publish the same cached snapshot to guest memory.
-            // ARM mappings may be uncached, making a second read of a large binding costly.
-            std::memcpy(guest + r.lo, before.data() + r.lo, r.hi - r.lo);
-            written(r.lo, r.hi - r.lo);
+            for (size_t at = r.lo; at < r.hi;) {
+                // Stop at guest page boundaries, clipping both ends to the recorded binding.
+                const size_t n = std::min(r.hi - at, snapshot.size() - at % snapshot.size());
+                // Read an ARM GPU mapping once into cached memory. A writable descriptor is an upper
+                // bound on stores, not proof that every byte changed. Avoid dirtying unchanged guest
+                // pages: that otherwise re-scans huge bindings and invalidates unchanged textures.
+                std::memcpy(snapshot.data(), mapped + at, n);
+                if (std::memcmp(before.data() + at, snapshot.data(), n))
+                    std::memcpy(before.data() + at, snapshot.data(), n);
+                if (std::memcmp(guest + at, snapshot.data(), n)) {
+                    std::memcpy(guest + at, snapshot.data(), n);
+                    written(at, n);
+                }
+                at += n;
+            }
             bytes += r.hi - r.lo;
         }
         writes.clear();

@@ -79,7 +79,11 @@ Overlapping address ranges are planned before drawing, but GPU copies are alloca
 used. Partial buffers from an older plan are retired before any draw can name them. This avoids copying thousands
 of unused texture allocations while keeping one GPU buffer per guest page. Retired copies are not scanned again.
 The first twelve submits and then every 120th log live buffer MB, CPU ranges checked, GPU write bytes read back,
-upload/GPU/read-back times, and whether tracked ranges or full scanning were used.
+bytes published to guest memory, upload/GPU/read-back times, and whether tracked ranges or full scanning were used.
+Tracked readback checks the recorded writable ranges in page-sized pieces but publishes and invalidates only pieces
+that differ from guest memory. An unchanged GPU value still overwrites a conflicting CPU edit within that range.
+This avoids turning a large writable binding into a large CPU dirty range or a reload of unchanged textures. It does
+not eliminate the cost of reading the GPU range; compare MB read with MB published when measuring performance.
 The GPU allocation and
 its CPU comparison baseline add roughly twice the copied pool bytes to the game's memory use. Full page scans and
 GPU waits can substantially reduce frame rate; this is an experimental compatibility path, not a performance result.
