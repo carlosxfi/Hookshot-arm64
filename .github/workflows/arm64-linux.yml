@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  checks: write
 
 concurrency:
   group: arm64-platform-${{ github.event_name }}-${{ github.ref }}
@@ -51,11 +52,37 @@ jobs:
       - name: Nonlocal jumps and real Linux faults
         run: python3 tests/test_arm64_platform.py
       - name: Compile the complete host runtime without a game
-        run: python3 nx2/check_platform.py
+        shell: bash
+        run: python3 nx2/check_platform.py 2>&1 | tee runtime-check.log
       - name: Compile and link the Vulkan renderer without a game
         env:
           RX_VK_ONLY: '1'
-        run: python3 nx2/build.py --standalone --jobs 2
+        shell: bash
+        run: python3 nx2/build.py --standalone --jobs 2 2>&1 | tee renderer-check.log
+      - name: Publish compiler diagnostics
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CHECK_NAME: Compiler diagnostics (${{ matrix.runner }})
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          logs = []
+          for name in ('runtime-check.log', 'renderer-check.log'):
+              path = Path(name)
+              if path.exists():
+                  logs.append(name + '\n' + path.read_text(errors='replace')[-24000:])
+          payload = {'name': os.environ['CHECK_NAME'], 'head_sha': os.environ['CHECK_SHA'],
+                     'status': 'completed', 'conclusion': 'failure',
+                     'output': {'title': 'Native compiler diagnostics',
+                                'summary': 'Game-free runtime/renderer compiler output.',
+                                'text': '\n\n'.join(logs) or 'Failed before compilation; see the workflow log.'}}
+          Path('compiler-diagnostics.json').write_text(json.dumps(payload))
+          PY
+          gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" --input compiler-diagnostics.json > /dev/null
       - name: Record what was checked
         if: always()
         run: |
