@@ -32,6 +32,7 @@
 #include "vk_gprof.h"      // (RX_VK_PASS_TIMING)
 #include "import_hold.h"
 #include "guest_copy.h"
+#include "guest_copy_dirty.h"
 #ifdef __linux__
 #include <cerrno>
 #include <dlfcn.h>
@@ -704,6 +705,7 @@ inline uint32_t page_gen(uint64_t p) {
 }
 uint32_t gen_now = 1;
 uint64_t pages_collected = 0;
+GuestCopyCpuWrites copy_cpu_writes;
 
 void stamp_page(uint64_t p, uint32_t g) {
     if (p >= kPages) return;
@@ -714,6 +716,10 @@ void stamp_page(uint64_t p, uint32_t g) {
     }
     store_u32(c[p % kChunkPages], g);
     region_gen[p / kRegionPages] = g;
+}
+void stamp_cpu_page(uint64_t p, uint32_t g) {
+    stamp_page(p, g);
+    if (guest_copy_mode) copy_cpu_writes.note(p, g);
 }
 } // namespace
 
@@ -738,7 +744,7 @@ void memory_collect_written() {
                 if (const uint8_t* q = host->gpu_ptr(guest, &avail)) host->mark_written(q, 4096);
                 continue;
             }
-            stamp_page(pages[i], g);
+            stamp_cpu_page(pages[i], g);
         }
         pages_collected += (uint64_t)n;
         cap_view_bump();
@@ -1631,7 +1637,7 @@ bool take_capture(std::unique_ptr<Capture> c, uint64_t value, uint64_t completed
     uint32_t g = 0;
     if (!c->pages.empty()) {
         g = ++gen_now;
-        for (uint32_t p : c->pages) stamp_page(p, g);
+        for (uint32_t p : c->pages) stamp_cpu_page(p, g);
         pages_collected += c->pages.size();
     }
     if (!c->pages.empty() && tex_capture_on()) {   // (the texture storage it took: the shadow, as of this submit)
@@ -3557,7 +3563,7 @@ void memory_copy_before_submit(VkCommandBuffer cmd) {
             copy_upload_checked += p.hi - p.lo;
         } else {
             std::vector<std::pair<uint64_t, uint64_t>> ranges;
-            memory_written_runs(p.lo, p.hi - p.lo, p.copy_gen, ranges);
+            copy_cpu_writes.runs(p.lo, p.hi - p.lo, p.copy_gen, ranges);
             for (const auto& [lo, hi] : ranges) {
                 p.copy->upload_range(p.copy_map, host->guest_base() + p.lo, lo, hi - lo);
                 copy_upload_checked += hi - lo;

@@ -84,6 +84,9 @@ Tracked readback checks the recorded writable ranges in page-sized pieces but pu
 that differ from guest memory. An unchanged GPU value still overwrites a conflicting CPU edit within that range.
 This avoids turning a large writable binding into a large CPU dirty range or a reload of unchanged textures. It does
 not eliminate the cost of reading the GPU range; compare MB read with MB published when measuring performance.
+Upload checks use a separate index of CPU-written pages collected from the write watch and submission captures.
+GPU write declarations continue to update texture generations, but do not enter that upload index. This prevents a
+large writable GPU binding from triggering an equally large CPU upload comparison before it even executes.
 The GPU allocation and
 its CPU comparison baseline add roughly twice the copied pool bytes to the game's memory use. Full page scans and
 GPU waits can substantially reduce frame rate; this is an experimental compatibility path, not a performance result.
