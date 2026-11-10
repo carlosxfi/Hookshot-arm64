@@ -33,7 +33,7 @@ jobs:
           persist-credentials: false
       - name: Native compiler and runtime headers
         run: |
-          sudo apt-get update
+          sudo apt-get update -o Acquire::Retries=1 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
           sudo apt-get install -y clang lld g++ pkg-config libsdl2-dev libavcodec-dev libswscale-dev libswresample-dev libavutil-dev
       - name: Vulkan headers
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -48,6 +48,13 @@ jobs:
           repository: KhronosGroup/SPIRV-Headers
           ref: 04f10f650d514df88b76d25e83db360142c7b174
           path: cpm/spirv-headers/pinned
+          persist-credentials: false
+      - name: Vulkan Memory Allocator headers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
+          ref: 1d8f600fd424278486eade7ed3e877c99f0846b1
+          path: cpm/vulkanmemoryallocator/pinned
           persist-credentials: false
       - name: Nonlocal jumps and real Linux faults
         run: python3 tests/test_arm64_platform.py
