@@ -58,6 +58,10 @@ jobs:
           persist-credentials: false
       - name: Nonlocal jumps and real Linux faults
         run: python3 tests/test_arm64_platform.py
+      - name: Host-pointer and DMA-buffer memory startup
+        run: python3 tests/test_dma_memory_init.py
+      - name: Guest memory copies and fence publication
+        run: python3 tests/test_guest_copy.py
       - name: Compile the complete host runtime without a game
         shell: bash
         run: python3 nx2/check_platform.py 2>&1 | tee runtime-check.log

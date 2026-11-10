@@ -9,8 +9,16 @@ commit `d8f1229fe530fc8b668c7d0e6b55c0072e3ea140`, `runtime/platform/linux.c`:
 - `host/posix/signal_context.h`: ARM64 PC access and ESR access-type decoding, with bounds checks on signal records.
 
 Hookshot keeps its own a64-kit context, lifter, scheduler, 512 GiB guest window and NVN2 renderer.
-The TotK SIMD lowering, game hooks and renderer are not imported. The existing a64-kit floating-point helpers
+The TotK SIMD lowering and game hooks are not imported. The existing a64-kit floating-point helpers
 already have an AArch64 implementation.
+
+## Guest memory copies
+
+`gpu/vk/guest_copy.h` and the copy mode in `vk_memory.cpp` / `vk_replay.cpp` adapt the shadow-storage approach
+described in the same reference repository's `runtime/vk_memory.c`: a separate host-visible GPU buffer, CPU uploads,
+and GPU results copied back after completion. Hookshot uses its own allocation and pool bookkeeping. This initial
+implementation scans page contents, serializes recordings, and publishes timeline completion only after CPU
+write-back; it does not import TotK's pool index, dirty-page scanner, or renderer wholesale.
 
 The adapted code retains the following license:
 
