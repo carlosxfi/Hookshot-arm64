@@ -29,6 +29,7 @@ def main():
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -41,6 +42,7 @@ std::map<uint64_t,Pool> imported;
 Pool *last_pool=nullptr,*pool_cache[4096]{};
 uint64_t max_import_size=128ull<<20;
 int failures=0,imports=0,retires=0,bg_starts=0;
+bool guest_copy_mode=false;
 int64_t st_bg_waits=0,st_prefetch_used=0,st_prefetch_sent=0,st_prefetch_dropped=0;
 struct { bool external_memory_host=true; } dev;
 std::mutex bg_mu;std::condition_variable bg_done_cv,bg_cv;std::vector<uint64_t> bg_inflight;
@@ -82,7 +84,23 @@ int check_prefetch(int mode) {
     std::printf("PASS: prefetched first use, reuse, unprefetched lookup, neighbour queueing (mode %d)\\n",mode);
     return 0;
 }
+int check_copy() {
+    guest_copy_mode=true;
+    CHECK(import_chunk()==0);
+    const uint64_t base=0x1000000000ull,mb=1ull<<20;
+    guest_pools={{base,base+mb},{base+mb/2,base+2*mb}};
+    CHECK(pool_lookup(base+64,64) && imports==1);
+    auto p=pool_lookup(base+mb+64,64);
+    CHECK(p && p->lo==base && p->hi==base+2*mb && imports==2 && retires==1);
+    // Once coalesced ahead of recording, every overlapping game pool must reuse that one copy.
+    CHECK(pool_lookup(base+64,64)==p && pool_lookup(base+mb+64,64)==p && imports==2);
+    prefetch_chunks(base,base+2*mb,16*mb);
+    CHECK(bg_queue.empty() && bg_starts==0);
+    std::puts("PASS: copied pools coalesce and reuse one range, without chunking or background prefetch");
+    return 0;
+}
 int main(int argc,char **argv) {
+    if(argc>1 && !std::strcmp(argv[1],"copy")) return check_copy();
     if(argc>1) return check_prefetch(std::atoi(argv[1]));
     const uint64_t base=0x1000000000ull,extent=0x99200000ull;
     guest_pools.push_back({base,base+extent});
@@ -131,4 +149,6 @@ int main(int argc,char **argv) {
             subprocess.run([str(exe)],env=dict(os.environ,RX_VK_IMPORT_CHUNK_MB=chunk,RX_VK_PREFETCH_CHUNKS='0'),check=True)
         for mode in ('1','0','2'):
             subprocess.run([str(exe),mode],env=dict(os.environ,RX_VK_IMPORT_CHUNK_MB='16',RX_VK_PREFETCH_CHUNKS='0' if mode=='0' else '1'),check=True)
+        subprocess.run([str(exe),'copy'],env=dict(os.environ,RX_VK_IMPORT_CHUNK_MB='16',RX_VK_PREFETCH_CHUNKS='1'),check=True)
 if __name__=='__main__':main()
+
