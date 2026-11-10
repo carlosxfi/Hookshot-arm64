@@ -53,7 +53,17 @@ CondNote cond_ring[1 << 15];
 uint32_t cond_ring_at = 0;
 namespace {
 
-[[noreturn]] void replay_fatal(const char* why);
+/// The replay cannot go on: logged, the host's queued log written out (as hos_fatal does: a device lost's report is many
+/// lines, and the queue went with the process), written to stderr and the process ended (exit code 3). For a parallel
+/// replay's init command buffer that could not be ended: images already made and published lost their first layout
+/// change, and any later submission may use them
+[[noreturn]] void replay_fatal(const char* why) {
+    logf("vk: FATAL: %s", why);
+    if (host && host->log_flush) host->log_flush();
+    std::fprintf(stderr, "vk: FATAL: %s\n", why);
+    std::fflush(stderr);
+    std::_Exit(3);
+}
 
 // ---- submissions: a timeline semaphore; value n = the n-th submit done ----
 VkSemaphore timeline = VK_NULL_HANDLE;
@@ -1342,17 +1352,6 @@ void record_segment(VkCommandBuffer& cmd, const Segment& g) {
     ub_limit = SIZE_MAX;
 }
 
-/// The replay cannot go on: logged, the host's queued log written out (as hos_fatal does: a device lost's report is many
-/// lines, and the queue went with the process), written to stderr and the process ended (exit code 3). For a parallel
-/// replay's init command buffer that could not be ended: images already made and published lost their first layout
-/// change, and any later submission may use them
-[[noreturn]] void replay_fatal(const char* why) {
-    logf("vk: FATAL: %s", why);
-    if (host && host->log_flush) host->log_flush();
-    std::fprintf(stderr, "vk: FATAL: %s\n", why);
-    std::fflush(stderr);
-    std::_Exit(3);
-}
 std::recursive_mutex par_mu;
 
 /// A command buffer of the submission from h (its start, or where it stopped at a wait): on the replay thread alone

@@ -84,16 +84,21 @@ FILE* fake_fopen(const char*, const char*) {
 }
 void vkGetPhysicalDeviceProperties2(int, VkPhysicalDeviceProperties2* props) {
     ++queries;
-    for (Base* b = (Base*)props->pNext; b; b = (Base*)b->pNext) {
-        if (b->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT) {
+    for (void* next = props->pNext; next;) {
+        // Read the common prefix without aliasing distinct fake C++ structure types. Clang can otherwise
+        // eliminate pNext/sType stores at -O2; the production Vulkan call is an external API boundary.
+        Base header{};
+        memcpy(&header, next, sizeof header);
+        if (header.sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT) {
             assert(dev.external_memory_host && vkGetMemoryHostPointerPropertiesEXT);
             ++host_queries;
-            ((VkPhysicalDeviceExternalMemoryHostPropertiesEXT*)b)->minImportedHostPointerAlignment = 65536;
-        } else if (b->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES)
-            ((VkPhysicalDeviceVulkan11Properties*)b)->maxMemoryAllocationSize = 1024;
-        else if (b->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES)
-            ((VkPhysicalDeviceVulkan13Properties*)b)->maxBufferSize = 512;
+            ((VkPhysicalDeviceExternalMemoryHostPropertiesEXT*)next)->minImportedHostPointerAlignment = 65536;
+        } else if (header.sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES)
+            ((VkPhysicalDeviceVulkan11Properties*)next)->maxMemoryAllocationSize = 1024;
+        else if (header.sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES)
+            ((VkPhysicalDeviceVulkan13Properties*)next)->maxBufferSize = 512;
         else assert(false);
+        next = header.pNext;
     }
 }
 #define RTLD_DEFAULT nullptr
