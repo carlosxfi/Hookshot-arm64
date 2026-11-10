@@ -441,6 +441,10 @@ typedef struct _EXCEPTION_RECORD {
 typedef struct {
     DWORD64 Rax, Rcx, Rdx, Rbx, Rsp, Rbp, Rsi, Rdi, R8, R9, R10, R11, R12, R13, R14, R15, Rip;
     DWORD EFlags, ContextFlags;
+#if defined(__aarch64__)
+    /* Rip/Rsp above carry the native PC/SP for shared crash diagnostics. X holds the real ARM registers. */
+    DWORD64 X[31], Pstate;
+#endif
     DWORD64 Dr0, Dr1, Dr2, Dr3, Dr6, Dr7;   /* (no thread's context is read or set here: GetThreadContext fails) */
 } CONTEXT, *PCONTEXT;
 #define EXCEPTION_SINGLE_STEP 0x80000004u
@@ -610,3 +614,4 @@ BOOL GetTextExtentPoint32A(HDC dc, LPCSTR s, int n, SIZE *size);
 }
 #endif
 #endif
+

@@ -15,6 +15,7 @@
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <ucontext.h>
+#include "signal_context.h"
 
 /* the guest window (third_party/a64-kit/rt/a64.h A64_HOST_BASE, host/hos.h HOS_GUEST_SPACE): one mapping, all of it
    readable and writable, which VirtualQuery reports as committed without asking the kernel */
@@ -606,7 +607,11 @@ BOOL GetLogicalProcessorInformation(SYSTEM_LOGICAL_PROCESSOR_INFORMATION *info, 
 }
 void GetSystemInfo(SYSTEM_INFO *si) {
     memset(si, 0, sizeof *si);
-    si->wProcessorArchitecture = 9;   /* (PROCESSOR_ARCHITECTURE_AMD64) */
+#if defined(__aarch64__)
+    si->wProcessorArchitecture = 12;  /* PROCESSOR_ARCHITECTURE_ARM64 */
+#else
+    si->wProcessorArchitecture = 9;   /* PROCESSOR_ARCHITECTURE_AMD64 */
+#endif
     si->dwPageSize = (DWORD)sysconf(_SC_PAGESIZE);
     si->dwAllocationGranularity = 0x10000;
     si->dwNumberOfProcessors = (DWORD)sysconf(_SC_NPROCESSORS_ONLN);
@@ -1084,20 +1089,37 @@ static struct sigaction previous[32];
 static pthread_mutex_t handlers_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static void context_from(CONTEXT *c, const ucontext_t *uc) {
+    memset(c, 0, sizeof *c);
+#if defined(__aarch64__)
+    for (int i = 0; i < 31; i++) c->X[i] = uc->uc_mcontext.regs[i];
+    c->Rip = uc->uc_mcontext.pc;
+    c->Rsp = uc->uc_mcontext.sp;
+    c->Rbp = uc->uc_mcontext.regs[29];
+    c->Pstate = uc->uc_mcontext.pstate;
+    c->ContextFlags = CONTEXT_FULL;
+#else
     const greg_t *g = uc->uc_mcontext.gregs;
     c->Rax = (DWORD64)g[REG_RAX], c->Rcx = (DWORD64)g[REG_RCX], c->Rdx = (DWORD64)g[REG_RDX], c->Rbx = (DWORD64)g[REG_RBX];
     c->Rsp = (DWORD64)g[REG_RSP], c->Rbp = (DWORD64)g[REG_RBP], c->Rsi = (DWORD64)g[REG_RSI], c->Rdi = (DWORD64)g[REG_RDI];
     c->R8 = (DWORD64)g[REG_R8], c->R9 = (DWORD64)g[REG_R9], c->R10 = (DWORD64)g[REG_R10], c->R11 = (DWORD64)g[REG_R11];
     c->R12 = (DWORD64)g[REG_R12], c->R13 = (DWORD64)g[REG_R13], c->R14 = (DWORD64)g[REG_R14], c->R15 = (DWORD64)g[REG_R15];
     c->Rip = (DWORD64)g[REG_RIP], c->EFlags = (DWORD)g[REG_EFL], c->ContextFlags = CONTEXT_FULL;
+#endif
 }
 static void context_to(ucontext_t *uc, const CONTEXT *c) {
+#if defined(__aarch64__)
+    for (int i = 0; i < 31; i++) uc->uc_mcontext.regs[i] = c->X[i];
+    uc->uc_mcontext.pc = c->Rip;
+    uc->uc_mcontext.sp = c->Rsp;
+    uc->uc_mcontext.pstate = c->Pstate;
+#else
     greg_t *g = uc->uc_mcontext.gregs;
     g[REG_RAX] = (greg_t)c->Rax, g[REG_RCX] = (greg_t)c->Rcx, g[REG_RDX] = (greg_t)c->Rdx, g[REG_RBX] = (greg_t)c->Rbx;
     g[REG_RSP] = (greg_t)c->Rsp, g[REG_RBP] = (greg_t)c->Rbp, g[REG_RSI] = (greg_t)c->Rsi, g[REG_RDI] = (greg_t)c->Rdi;
     g[REG_R8] = (greg_t)c->R8, g[REG_R9] = (greg_t)c->R9, g[REG_R10] = (greg_t)c->R10, g[REG_R11] = (greg_t)c->R11;
     g[REG_R12] = (greg_t)c->R12, g[REG_R13] = (greg_t)c->R13, g[REG_R14] = (greg_t)c->R14, g[REG_R15] = (greg_t)c->R15;
     g[REG_RIP] = (greg_t)c->Rip;
+#endif
 }
 static void on_signal(int sig, siginfo_t *si, void *uctx) {
     ucontext_t *uc = (ucontext_t *)uctx;
@@ -1111,7 +1133,7 @@ static void on_signal(int sig, siginfo_t *si, void *uctx) {
     rec.ExceptionAddress = (void *)(uintptr_t)ctx.Rip;
     if (sig == SIGSEGV || sig == SIGBUS) {
         rec.NumberParameters = 2;
-        rec.ExceptionInformation[0] = (uc->uc_mcontext.gregs[REG_ERR] & 2) ? 1 : 0;   /* (1: a write) */
+        rec.ExceptionInformation[0] = hos_signal_access(uc);   /* 0 read, 1 write, 8 execute */
         rec.ExceptionInformation[1] = (ULONG_PTR)si->si_addr;
     }
     EXCEPTION_POINTERS ep = {&rec, &ctx};
@@ -1307,3 +1329,4 @@ MMRESULT waveOutReset(HWAVEOUT hw) {
     return 0;
 }
 MMRESULT waveOutClose(HWAVEOUT hw) { waveOutReset(hw); return 0; }
+

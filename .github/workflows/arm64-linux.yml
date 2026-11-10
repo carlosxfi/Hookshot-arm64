@@ -1,0 +1,67 @@
+name: ARM64 Linux platform checks
+
+on:
+  push:
+    branches: [main, arm64-linux]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arm64-platform-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04-arm, ubuntu-24.04]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CC: clang
+      CXX: clang++
+      RX_CPM: ${{ github.workspace }}/cpm
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Native compiler and runtime headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang lld g++ pkg-config libsdl2-dev libavcodec-dev libswscale-dev libswresample-dev libavutil-dev
+      - name: Vulkan headers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: KhronosGroup/Vulkan-Headers
+          ref: 74d8a6cb930c68ef617b202c3ff3c59d919e086b
+          path: cpm/vulkanheaders/pinned
+          persist-credentials: false
+      - name: SPIR-V headers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: KhronosGroup/SPIRV-Headers
+          ref: 04f10f650d514df88b76d25e83db360142c7b174
+          path: cpm/spirv-headers/pinned
+          persist-credentials: false
+      - name: Nonlocal jumps and real Linux faults
+        run: python3 tests/test_arm64_platform.py
+      - name: Compile the complete host runtime without a game
+        run: python3 nx2/check_platform.py
+      - name: Compile and link the Vulkan renderer without a game
+        env:
+          RX_VK_ONLY: '1'
+        run: python3 nx2/build.py --standalone --jobs 2
+      - name: Record what was checked
+        if: always()
+        run: |
+          if [ -f work/platform-check/result.json ]; then
+            cat work/platform-check/result.json >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f work/sa/build/hookshot_vk.so ]; then
+            file work/sa/build/hookshot_vk.so >> "$GITHUB_STEP_SUMMARY"
+          fi

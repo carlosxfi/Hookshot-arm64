@@ -299,10 +299,14 @@ def check_cpu():
     """(linux) The AppImage's Vulkan back end (HOOKSHOT_VK_PREBUILT) is built for x86-64-v3 elsewhere
     (scripts/linux/appimage.sh), while the game follows this PC (nx2/host_cpu.py): on a CPU without AVX2 it would stop at
     its start. Said now, before the game is read, not 40 minutes in (issue 363)"""
-    if not os.environ.get("HOOKSHOT_VK_PREBUILT") or os.environ.get("RX_MARCH"):
+    if not os.environ.get("HOOKSHOT_VK_PREBUILT"):
         return
     sys.path.insert(0, HERE)
-    from host_cpu import host_march
+    from host_cpu import host_march, host_is_arm64
+    if host_is_arm64():
+        fail("The prebuilt renderer is for x86-64. Unset HOOKSHOT_VK_PREBUILT and build the renderer from source on ARM64 Linux.")
+    if os.environ.get("RX_MARCH"):
+        return
     m = host_march()
     if m != "x86-64-v3":
         fail("Your processor has no AVX2 (it runs %s), and the AppImage's renderer needs it. Build Hookshot from source "
@@ -1312,3 +1316,4 @@ def cli():
 
 if __name__ == "__main__":
     cli()
+
