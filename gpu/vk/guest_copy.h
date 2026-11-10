@@ -26,10 +26,12 @@ public:
     }
     // Compare pages rather than blindly replacing the buffer: unchanged pages keep GPU results. Keep exactly
     // the bytes uploaded as the baseline, even if another guest thread is writing while the copy is taken.
-    uint64_t upload(uint8_t* mapped, const uint8_t* guest) {
+    uint64_t upload_range(uint8_t* mapped, const uint8_t* guest, size_t offset, size_t size) {
         uint64_t bytes = 0;
-        for (size_t at = 0; at < before.size(); at += 4096) {
-            const size_t n = std::min<size_t>(4096, before.size() - at);
+        if (offset >= before.size() || !size) return 0;
+        const size_t end = offset + std::min(size, before.size() - offset);
+        for (size_t at = offset; at < end; at += 4096) {
+            const size_t n = std::min<size_t>(4096, end - at);
             if (!std::memcmp(guest + at, before.data() + at, n)) continue;
             // Capture once into cached CPU memory, then upload those same bytes. Reading the mapped GPU
             // allocation back just to build this baseline is especially expensive on uncached ARM mappings.
@@ -37,6 +39,25 @@ public:
             std::memcpy(mapped + at, before.data() + at, n);
             bytes += n;
         }
+        return bytes;
+    }
+    uint64_t upload(uint8_t* mapped, const uint8_t* guest) {
+        return upload_range(mapped, guest, 0, before.size());
+    }
+    template<class Written> uint64_t download_tracked(uint8_t* guest, const uint8_t* mapped, Written written) {
+        uint64_t bytes = 0;
+        std::sort(writes.begin(), writes.end(), [](Range a, Range b) { return a.lo < b.lo; });
+        for (size_t i = 0; i < writes.size();) {
+            Range r = writes[i++];
+            while (i < writes.size() && writes[i].lo <= r.hi) r.hi = std::max(r.hi, writes[i++].hi);
+            // Known stores must win even when they wrote their previous value. Read-only storage is neither
+            // compared nor copied. The renderer must select full diff scanning for unbounded pointer stores.
+            std::memcpy(guest + r.lo, mapped + r.lo, r.hi - r.lo);
+            std::memcpy(before.data() + r.lo, mapped + r.lo, r.hi - r.lo);
+            written(r.lo, r.hi - r.lo);
+            bytes += r.hi - r.lo;
+        }
+        writes.clear();
         return bytes;
     }
     template<class Written> uint64_t download(uint8_t* guest, const uint8_t* mapped, Written written) {

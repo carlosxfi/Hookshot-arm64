@@ -55,6 +55,7 @@ struct Pool {
     VkDeviceAddress address = 0;
     uint8_t* copy_map = nullptr; // Separate coherent storage when neither import mechanism is usable.
     std::shared_ptr<GuestCopy> copy; // Pool nodes are copied when inserted; the baseline is owned once.
+    uint32_t copy_gen = 0; // CPU page generations already checked for upload.
 
     // its VRAM mirror (see "the VRAM mirror" below)
     enum : uint8_t { MIRROR_NONE, MIRROR_WANTED, MIRROR_ON, MIRROR_REFUSED } mstate = MIRROR_NONE;
@@ -3534,15 +3535,35 @@ template<class F> void for_copy_pools(F f) {
 std::chrono::steady_clock::time_point copy_submit_start;
 double copy_upload_ms = 0;
 uint64_t copy_live_bytes = 0, copy_live_pools = 0;
+uint64_t copy_upload_checked = 0, copy_read_bytes = 0;
+bool copy_full_scan() {
+    // The emitter's pointer-table stores and atomics are opt-in. With them enabled, descriptor ranges cannot
+    // bound every possible GPU write, so retain the complete diff path. Also provide an explicit A/B override.
+    static const bool full = getenv("RX_VK_FOLLOW_STORES") || getenv("RX_VK_GUEST_COPY_FULL_SCAN");
+    return full;
+}
 void memory_copy_before_submit(VkCommandBuffer cmd) {
     if (!guest_copy_mode) return;
     copy_submit_start = std::chrono::steady_clock::now();
     copy_live_bytes = copy_live_pools = 0;
+    copy_upload_checked = copy_read_bytes = 0;
+    if (!copy_full_scan()) memory_collect_written(); // Refresh the CPU write watch outside pools_mu.
     std::lock_guard lk(pools_mu);
     for_copy_pools([](Pool& p) {
         copy_live_bytes += p.hi - p.lo;
         ++copy_live_pools;
-        p.copy->upload(p.copy_map, host->guest_base() + p.lo);
+        if (copy_full_scan()) {
+            p.copy->upload(p.copy_map, host->guest_base() + p.lo);
+            copy_upload_checked += p.hi - p.lo;
+        } else {
+            std::vector<std::pair<uint64_t, uint64_t>> ranges;
+            memory_written_runs(p.lo, p.hi - p.lo, p.copy_gen, ranges);
+            for (const auto& [lo, hi] : ranges) {
+                p.copy->upload_range(p.copy_map, host->guest_base() + p.lo, lo, hi - lo);
+                copy_upload_checked += hi - lo;
+            }
+            p.copy_gen = gen_now;
+        }
     });
     copy_upload_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - copy_submit_start).count();
     // Coherent host writes become available through queue submission. GPU writes additionally need an
@@ -3562,21 +3583,28 @@ void memory_copy_after_submit() {
     const auto t0 = std::chrono::steady_clock::now();
     std::lock_guard lk(pools_mu);
     for_copy_pools([](Pool& p) {
-        p.copy->download(host->guest_base() + p.lo, p.copy_map, [&](size_t offset, size_t size) {
+        const auto written = [&](size_t offset, size_t size) {
             // Pointer-following GPU writes can be outside the ranges stamped while commands were recorded.
             // Invalidate texture/capture reads of those pages once the results actually reach guest memory.
             memory_stamp(p.lo + offset, size);
             wb_pages_note(p.lo + offset, p.lo + offset + size, mem_rec_value);
-        });
+        };
+        if (copy_full_scan()) {
+            p.copy->download(host->guest_base() + p.lo, p.copy_map, written);
+            copy_read_bytes += p.hi - p.lo;
+        } else {
+            copy_read_bytes += p.copy->download_tracked(host->guest_base() + p.lo, p.copy_map, written);
+        }
     });
     const auto t1 = std::chrono::steady_clock::now();
     static uint64_t count = 0;
     if (++count <= 12 || count % 120 == 0) {
         const double total = std::chrono::duration<double, std::milli>(t1 - copy_submit_start).count();
         const double download = std::chrono::duration<double, std::milli>(t1 - t0).count();
-        logf("vk: guest copy submit %llu: %llu live buffers, %.1f MB scanned; upload %.1f ms, GPU+submit %.1f ms, read-back %.1f ms",
+        logf("vk: guest copy submit %llu: %llu live buffers, %.1f MB live; upload %.1f ms (%.2f MB checked), GPU+submit %.1f ms, read-back %.1f ms (%.2f MB read), %s",
              (unsigned long long)count, (unsigned long long)copy_live_pools, copy_live_bytes / 1048576.0,
-             copy_upload_ms, std::max(0.0, total - copy_upload_ms - download), download);
+             copy_upload_ms, copy_upload_checked / 1048576.0, std::max(0.0, total - copy_upload_ms - download), download,
+             copy_read_bytes / 1048576.0, copy_full_scan() ? "full scan" : "tracked ranges");
     }
 }
 } // namespace mkwvk

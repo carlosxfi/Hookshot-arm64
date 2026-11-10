@@ -2946,7 +2946,11 @@ VkBufferView texel_buffer_view(const nvn_tex* t, const nvn_view* v, bool storage
     if (bpb <= 0) return VK_NULL_HANDLE;
     const uint64_t size = (uint64_t)std::max(1u, t->d.width) * bpb;
     // (a formatted store into it: textures over that memory are uploaded again once the GPU is done)
-    if (storage) texture_gpu_wrote(t->gpu, size);
+    if (storage) {
+        texture_gpu_wrote(t->gpu, size);
+        // Buffer views bypass gpu_buffer_bind, and cached views still need their writes tracked each submit.
+        memory_note_gpu_write(t->gpu, size);
+    }
     static std::unordered_map<uint64_t, VkBufferView> views;
     const uint64_t key = mix(mix(t->gpu, (uint64_t)f << 1 | storage), size);
     auto it = views.find(key);
@@ -3545,3 +3549,4 @@ void texture_read_texels(const nvn_tex* t, unsigned level, unsigned layer0, cons
 }
 
 } // namespace mkwvk
+

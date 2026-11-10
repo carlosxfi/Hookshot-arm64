@@ -87,6 +87,25 @@ int main() {
         assert(lo == 4096 && n == 4096); notified = true;
     });
     assert(notified);
+    // Tracked mode: inspect only dirty CPU ranges and copy only recorded GPU destinations.
+    GuestCopy tracked;
+    std::vector<uint8_t> tg(N, 7), tm(N, 0);
+    tracked.init(tm.data(), tg.data(), N);
+    tg[3] = 10; tg[4096] = 11;
+    assert(tracked.upload_range(tm.data(), tg.data(), 0, 4096) == 4096);
+    assert(tm[3] == 10 && tm[4096] == 7);
+    assert(tracked.upload_range(tm.data(), tg.data(), 4096, SIZE_MAX) == 4096);
+    assert(tm[4096] == 11);
+    assert(tracked.upload_range(tm.data(), tg.data(), N, SIZE_MAX) == 0);
+    tg[3] = 99; tg[100] = 88; tm[4] = 55;
+    tracked.note_write(3, 2); tracked.note_write(4, 2);
+    size_t marked = 0;
+    assert(tracked.download_tracked(tg.data(), tm.data(), [&](size_t lo, size_t n) {
+        assert(lo == 3 && n == 3); marked += n;
+    }) == 3);
+    assert(marked == 3 && tg[3] == 10 && tg[4] == 55 && tg[100] == 88);
+    assert(tracked.download_tracked(tg.data(), tm.data(), [](size_t, size_t) { assert(false); }) == 0);
+    assert(tracked.upload_range(tm.data(), tg.data(), 0, 4096) == 4096 && tm[100] == 88);
 }
 '''
 
@@ -259,6 +278,66 @@ class GuestCopyTests(unittest.TestCase):
 
     def test_cpu_gpu_transfer_and_conflicts(self):
         self.compile_run(TRANSFER)
+
+    def test_pointer_stores_force_conservative_scanning(self):
+        memory = (ROOT / "gpu/vk/vk_memory.cpp").read_text(encoding="utf-8")
+        policy = function(memory, "bool copy_full_scan()")
+        fixture = r'''
+#include <cassert>
+#include <cstdlib>
+#include <cstring>
+bool follow=false, full=false;
+const char* fake_getenv(const char* key) {
+    if (!strcmp(key,"RX_VK_FOLLOW_STORES")) return follow ? "0" : nullptr;
+    if (!strcmp(key,"RX_VK_GUEST_COPY_FULL_SCAN")) return full ? "1" : nullptr;
+    return nullptr;
+}
+#define getenv fake_getenv
+''' + policy + r'''
+int main(int argc,char** argv) {
+    assert(argc==2);
+    follow=!strcmp(argv[1],"follow"); full=!strcmp(argv[1],"full");
+    assert(copy_full_scan()==(follow||full));
+}
+'''
+        self.compile_run(fixture, ("tracked", "follow", "full"))
+
+    def test_cached_storage_texel_views_report_every_write(self):
+        texture = (ROOT / "gpu/vk/vk_texture.cpp").read_text(encoding="utf-8")
+        actual = function(texture, "VkBufferView texel_buffer_view(")
+        fixture = r'''
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
+#include <unordered_map>
+using VkBufferView=uint64_t;
+using VkFormat=int;
+constexpr int VK_NULL_HANDLE=0, VK_FORMAT_UNDEFINED=0, VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO=1;
+struct nvn_tex { uint64_t gpu; struct { uint32_t width=16; } d; };
+struct nvn_view {};
+struct VkBufferViewCreateInfo { int sType; uint64_t buffer=0; int format=0; uint64_t offset=0,range=0; };
+struct BufferRef { uint64_t buffer=1,offset=0; explicit operator bool() const {return buffer!=0;} };
+struct { int device=1; struct { struct { uint64_t minTexelBufferOffsetAlignment=16,maxTexelBufferElements=1024; } limits; } props; } dev;
+int dirty=0, notes=0, views=0, lookups=0;
+int view_nvn_format(const nvn_tex*,const nvn_view*) {return 1;}
+struct Format {int format=1;};
+Format vk_format(int) {return {};}
+int nvn_block_size(int,int*,int*) {return 4;}
+void texture_gpu_wrote(uint64_t g,uint64_t n) {assert(g==4096 && n==64);++dirty;}
+void memory_note_gpu_write(uint64_t g,uint64_t n) {assert(g==4096 && n==64);++notes;}
+uint64_t mix(uint64_t a,uint64_t b) {return a*65537+b;}
+BufferRef gpu_buffer(uint64_t,uint64_t) {++lookups;return {};}
+int vkCreateBufferView(int,const VkBufferViewCreateInfo*,void*,VkBufferView* view) {*view=++views;return 0;}
+''' + actual + r'''
+int main() {
+    nvn_tex tex{4096};
+    assert(texel_buffer_view(&tex,nullptr,false)==1 && notes==0 && dirty==0);
+    assert(texel_buffer_view(&tex,nullptr,true)==2 && notes==1 && dirty==1);
+    assert(texel_buffer_view(&tex,nullptr,true)==2 && notes==2 && dirty==2);
+    assert(views==2 && lookups==2); // cached view still registers the next submission's write
+}
+'''
+        self.compile_run(fixture)
 
     def test_actual_allocation_and_completion_order(self):
         memory = (ROOT / "gpu/vk/vk_memory.cpp").read_text(encoding="utf-8")

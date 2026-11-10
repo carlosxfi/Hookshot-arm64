@@ -65,20 +65,27 @@ the renderer automatically selects copies. `RX_VK_GUEST_COPY=1` forces copies fo
 The copy path allocates coherent, CPU-visible buffers with device addresses. It coalesces overlapping game pools
 before drawing, uploads changed pages before each recording is submitted, waits for its GPU fence, then copies
 results back before publishing either timeline semaphore. Known write ranges are copied even when a GPU store
-kept the previous value. A page diff also collects changes made by shaders following guest pointers outside those
-ranges, preserving CPU edits in bytes the GPU left unchanged. Identical-value stores outside reported write ranges
-cannot be detected by that diff. This path needs on-device validation, particularly GPU atomics and pointer-following
-compute shaders.
+kept the previous value. Uploads use the existing CPU dirty-page generations, and read-back visits recorded GPU
+write ranges, including cached storage-texel views. This avoids repeatedly comparing GB-sized read-only pools.
+`RX_VK_FOLLOW_STORES` enables unbounded writes/atomics through the shader page table; when it is present, the copy
+path automatically retains full diff scanning because descriptor ranges cannot bound those stores. Set
+`RX_VK_GUEST_COPY_FULL_SCAN=1` to force that conservative path for an A/B comparison; unset the variable for tracked
+ranges. As in the original fallback, full diff scanning cannot detect identical-value stores outside reported write
+ranges. GPU atomics and pointer-following compute shaders still require on-device validation.
 
 While copies are active, VRAM mirrors, asynchronous replay, parallel recording, recording chunks, queue bursts and
 batched submissions are disabled. Event waits between game queues still keep their normal ordering.
 Overlapping address ranges are planned before drawing, but GPU copies are allocated only when a buffer is actually
 used. Partial buffers from an older plan are retired before any draw can name them. This avoids copying thousands
 of unused texture allocations while keeping one GPU buffer per guest page. Retired copies are not scanned again.
-The first twelve submits and then every 120th log the live buffer count/MB and upload, GPU and read-back times.
+The first twelve submits and then every 120th log live buffer MB, CPU ranges checked, GPU write bytes read back,
+upload/GPU/read-back times, and whether tracked ranges or full scanning were used.
 The GPU allocation and
 its CPU comparison baseline add roughly twice the copied pool bytes to the game's memory use. Full page scans and
 GPU waits can substantially reduce frame rate; this is an experimental compatibility path, not a performance result.
+Keep `RX_VK_GPU_UNSWIZZLE=0` on the tested Odin: GPU texture conversion otherwise brought the entire 512 MB render
+target pool into copied storage. The tracked-range change does not change shader translation, so keep the existing
+pipeline/program caches while testing loading stalls and steady gameplay separately.
 An available DMA import that subsequently fails for a specific pool is still reported, not mixed with copy storage.
 
 ### Updating only the renderer after an existing native build
