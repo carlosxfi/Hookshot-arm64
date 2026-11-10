@@ -2,7 +2,7 @@ name: ARM64 Linux platform checks
 
 on:
   push:
-    branches: [main, arm64-linux]
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
