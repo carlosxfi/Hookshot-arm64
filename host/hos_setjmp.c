@@ -36,111 +36,7 @@ typedef struct { uint64_t rets[4], target; void *buf[32]; } SjSlot;   /* (buf: r
 typedef struct { SjSlot slot[DEPTH]; int depth, overflow; } SjStack;
 static _Thread_local SjStack *stack;
 
-#ifdef _WIN32
-/* buf: rbx rbp rdi rsi r12 r13 r14 r15 at 0-56, rsp (after the return) at 64, the return address at 72, xmm6-15 at
-   80-224, mxcsr at 240 and the x87 control word at 244 */
-__attribute__((naked, returns_twice)) int recomp_sj_setjmp(void **buf) {
-    __asm__ volatile(
-        "movq %rbx, 0(%rcx)\n\t"
-        "movq %rbp, 8(%rcx)\n\t"
-        "movq %rdi, 16(%rcx)\n\t"
-        "movq %rsi, 24(%rcx)\n\t"
-        "movq %r12, 32(%rcx)\n\t"
-        "movq %r13, 40(%rcx)\n\t"
-        "movq %r14, 48(%rcx)\n\t"
-        "movq %r15, 56(%rcx)\n\t"
-        "leaq 8(%rsp), %rdx\n\t"
-        "movq %rdx, 64(%rcx)\n\t"
-        "movq (%rsp), %rdx\n\t"
-        "movq %rdx, 72(%rcx)\n\t"
-        "movdqu %xmm6, 80(%rcx)\n\t"
-        "movdqu %xmm7, 96(%rcx)\n\t"
-        "movdqu %xmm8, 112(%rcx)\n\t"
-        "movdqu %xmm9, 128(%rcx)\n\t"
-        "movdqu %xmm10, 144(%rcx)\n\t"
-        "movdqu %xmm11, 160(%rcx)\n\t"
-        "movdqu %xmm12, 176(%rcx)\n\t"
-        "movdqu %xmm13, 192(%rcx)\n\t"
-        "movdqu %xmm14, 208(%rcx)\n\t"
-        "movdqu %xmm15, 224(%rcx)\n\t"
-        "stmxcsr 240(%rcx)\n\t"
-        "fnstcw 244(%rcx)\n\t"
-        "xorl %eax, %eax\n\t"
-        "ret\n\t");
-}
-
-__attribute__((naked, noreturn)) static void recomp_sj_longjmp(void **buf, int value) {
-    __asm__ volatile(
-        "movq 0(%rcx), %rbx\n\t"
-        "movq 8(%rcx), %rbp\n\t"
-        "movq 16(%rcx), %rdi\n\t"
-        "movq 24(%rcx), %rsi\n\t"
-        "movq 32(%rcx), %r12\n\t"
-        "movq 40(%rcx), %r13\n\t"
-        "movq 48(%rcx), %r14\n\t"
-        "movq 56(%rcx), %r15\n\t"
-        "movdqu 80(%rcx), %xmm6\n\t"
-        "movdqu 96(%rcx), %xmm7\n\t"
-        "movdqu 112(%rcx), %xmm8\n\t"
-        "movdqu 128(%rcx), %xmm9\n\t"
-        "movdqu 144(%rcx), %xmm10\n\t"
-        "movdqu 160(%rcx), %xmm11\n\t"
-        "movdqu 176(%rcx), %xmm12\n\t"
-        "movdqu 192(%rcx), %xmm13\n\t"
-        "movdqu 208(%rcx), %xmm14\n\t"
-        "movdqu 224(%rcx), %xmm15\n\t"
-        "ldmxcsr 240(%rcx)\n\t"
-        "fldcw 244(%rcx)\n\t"
-        "movl %edx, %eax\n\t"
-        "testl %eax, %eax\n\t"
-        "jnz 1f\n\t"
-        "incl %eax\n\t"
-        "1:\n\t"
-        "movq 64(%rcx), %rsp\n\t"
-        "jmpq *72(%rcx)\n\t");
-}
-
-#else
-/* (linux) the System V ABI's: the buffer as above, its callee-saved registers only (rbx rbp r12-r15: rdi, rsi and the
-   xmm registers are the caller's to keep there), buf in rdi and the value in esi */
-__attribute__((naked, returns_twice)) int recomp_sj_setjmp(void **buf) {
-    __asm__ volatile(
-        "movq %rbx, 0(%rdi)\n\t"
-        "movq %rbp, 8(%rdi)\n\t"
-        "movq %r12, 32(%rdi)\n\t"
-        "movq %r13, 40(%rdi)\n\t"
-        "movq %r14, 48(%rdi)\n\t"
-        "movq %r15, 56(%rdi)\n\t"
-        "leaq 8(%rsp), %rdx\n\t"
-        "movq %rdx, 64(%rdi)\n\t"
-        "movq (%rsp), %rdx\n\t"
-        "movq %rdx, 72(%rdi)\n\t"
-        "stmxcsr 240(%rdi)\n\t"
-        "fnstcw 244(%rdi)\n\t"
-        "xorl %eax, %eax\n\t"
-        "ret\n\t");
-}
-
-__attribute__((naked, noreturn)) static void recomp_sj_longjmp(void **buf, int value) {
-    __asm__ volatile(
-        "movq 0(%rdi), %rbx\n\t"
-        "movq 8(%rdi), %rbp\n\t"
-        "movq 32(%rdi), %r12\n\t"
-        "movq 40(%rdi), %r13\n\t"
-        "movq 48(%rdi), %r14\n\t"
-        "movq 56(%rdi), %r15\n\t"
-        "ldmxcsr 240(%rdi)\n\t"
-        "fldcw 244(%rdi)\n\t"
-        "movl %esi, %eax\n\t"
-        "testl %eax, %eax\n\t"
-        "jnz 1f\n\t"
-        "incl %eax\n\t"
-        "1:\n\t"
-        "movq 64(%rdi), %rsp\n\t"
-        "jmpq *72(%rdi)\n\t");
-}
-
-#endif
+#include "hos_setjmp_arch.h"
 
 void **recomp_sj_push(Ctx *c, uint64_t r0, uint64_t r1, uint64_t r2, uint64_t r3) {
     (void)c;
@@ -184,3 +80,4 @@ void hos_setjmp_return(Ctx *c, uint64_t target) {
    the owner's code inside longjmp's own frame, which returned into longjmp's caller (0x8168215c, the UDF after OoT's
    BL longjmp: the text box thread's "branch to a non-function") */
 void a64_ijump_hook(Ctx *c, uint64_t target) { hos_setjmp_return(c, target); }
+

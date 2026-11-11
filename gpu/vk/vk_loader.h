@@ -64,6 +64,7 @@
     X(vkResetFences)                                                                                                  \
     X(vkCreateSemaphore)                                                                                              \
     X(vkDestroySemaphore)                                                                                             \
+    X(vkSignalSemaphore)                                                                                              \
     X(vkWaitSemaphores)                                                                                               \
     X(vkGetSemaphoreCounterValue)                                                                                     \
     X(vkCreateImageView)                                                                                              \
@@ -177,3 +178,4 @@ void load_device(VkDevice device);
 } // namespace vkx
 
 using namespace vkx;
+

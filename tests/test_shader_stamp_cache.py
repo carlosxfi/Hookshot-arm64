@@ -74,7 +74,7 @@ class ShaderStampCacheTests(unittest.TestCase):
         namespace = {
             "os": os, "hashlib": hashlib,
             "GPU": str(self.root / "gpu"), "POSIX": str(self.root / "host/posix"), "HOST": str(self.root / "host"),
-            "LINUX": linux, "CPU": ["-march=x86-64"],
+            "LINUX": linux, "CPU": ["-march=x86-64"], "HOST_CPU": [],
             "kit": SimpleNamespace(ROOT=str(self.root), HERE=str(self.root / "nx2")),
             "toolchain": SimpleNamespace(find=lambda name: name, need=lambda name: name, mingw=lambda: mingw),
             "target": lambda: ["--target=x86_64-linux-gnu" if linux else "--target=x86_64-w64-mingw32"],
@@ -223,3 +223,4 @@ if __name__ == "__main__":
     args, rest = parser.parse_known_args()
     BUILD_SCRIPT = args.build_script
     unittest.main(argv=[sys.argv[0], *rest])
+

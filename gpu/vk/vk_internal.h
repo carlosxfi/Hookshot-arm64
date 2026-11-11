@@ -90,6 +90,9 @@ struct BufferRef {
         return buffer != VK_NULL_HANDLE;
     }
 };
+bool memory_guest_copy(); // Separate mapped buffers: completion includes CPU write-back.
+void memory_copy_before_submit(VkCommandBuffer cmd);
+void memory_copy_after_submit();
 bool memory_init();                                   // vk_memory.cpp
 void memory_cpu_owned(uint64_t guest, uint64_t size);   // (hookshot: words the replay writes on the CPU, left out of write-backs)
 void memory_table_begin();                         // (hookshot: a recording's page table changes held back for its upload commands)
@@ -355,3 +358,4 @@ struct ProfScopeHot {
 #define PROF(phase) ::mkwvk::ProfScope prof_scope_##phase(::mkwvk::phase)
 #define PROF_HOT(phase) ::mkwvk::ProfScopeHot prof_scope_##phase(::mkwvk::phase)   // (the per-draw phases: sampled, above)
 #define PROF_EXACT() ::mkwvk::ProfScope prof_scope_exact(-1)   // (a slow, rare path inside them: timed exactly, above)
+

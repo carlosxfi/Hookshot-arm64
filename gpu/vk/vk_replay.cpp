@@ -53,6 +53,18 @@ CondNote cond_ring[1 << 15];
 uint32_t cond_ring_at = 0;
 namespace {
 
+/// The replay cannot go on: logged, the host's queued log written out (as hos_fatal does: a device lost's report is many
+/// lines, and the queue went with the process), written to stderr and the process ended (exit code 3). For a parallel
+/// replay's init command buffer that could not be ended: images already made and published lost their first layout
+/// change, and any later submission may use them
+[[noreturn]] void replay_fatal(const char* why) {
+    logf("vk: FATAL: %s", why);
+    if (host && host->log_flush) host->log_flush();
+    std::fprintf(stderr, "vk: FATAL: %s\n", why);
+    std::fflush(stderr);
+    std::_Exit(3);
+}
+
 // ---- submissions: a timeline semaphore; value n = the n-th submit done ----
 VkSemaphore timeline = VK_NULL_HANDLE;
 // ---- (hookshot) recordings by number: a second timeline, signalled at the end of every recording with its number, and the
@@ -139,6 +151,7 @@ uint64_t completed() {
 // (hookshot) on by default with Mesa's RADV, where it was measured (issue 413: a Radeon 8060S on Bazzite, ~10 -> 30-50 fps, the
 // replay's queue submit ~70 -> ~6 ms a frame); elsewhere as before. RX_VK_BATCH=0 / 1: off / on on any driver
 bool batch_on() {
+    if (memory_guest_copy()) return false;
     static const bool on = [] {
         bool radv = false;
         VkPhysicalDeviceDriverProperties dp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
@@ -302,6 +315,7 @@ Recording& begin_recording(uint64_t value) {
 void submit_recording(Recording& r, bool signal_value = true, uint64_t signal_at = 0) {
     const bool uploads = texture_uploads_recorded();
     gprof_submitted(r.slot, uploads);
+    memory_copy_before_submit(r.cmd);
     gpu_time_end(r);
     vkEndCommandBuffer(r.upload);
     vkEndCommandBuffer(r.cmd);
@@ -333,6 +347,10 @@ void submit_recording(Recording& r, bool signal_value = true, uint64_t signal_at
     }
     si.signalSemaphoreInfoCount = nsig;
     si.pSignalSemaphoreInfos = nsig ? signals : nullptr;
+    // GPU completion alone is insufficient for separate storage. Publish timeline values from the host
+    // only after the fence and CPU write-back, so every existing wait/poll observes coherent guest memory.
+    if (memory_guest_copy()) si.signalSemaphoreInfoCount = 0;
+
     std::lock_guard lk(dev.present_mu);   // (one queue: submits and presents take turns)
     if (batch_on()) {
         if (pend.cbs.empty()) batch_next++, pend_since = std::chrono::steady_clock::now();
@@ -352,6 +370,20 @@ void submit_recording(Recording& r, bool signal_value = true, uint64_t signal_at
     static int failures;
     if (res != VK_SUCCESS && failures++ < 8) logf("vk: submit %llu failed (%d)", (unsigned long long)r.value, (int)res);
     if (res == VK_ERROR_DEVICE_LOST) device_lost();
+    if (memory_guest_copy()) {
+        if (res != VK_SUCCESS) replay_fatal("copy fallback queue submission failed");
+        const VkResult waited = vkWaitForFences(dev.device, 1, &r.fence, VK_TRUE, UINT64_MAX);
+        if (waited == VK_ERROR_DEVICE_LOST) device_lost();
+        if (waited != VK_SUCCESS) replay_fatal("copy fallback GPU fence failed");
+        memory_copy_after_submit();
+        for (uint32_t i = 0; i < nsig; ++i) {
+            VkSemaphoreSignalInfo info{VK_STRUCTURE_TYPE_SEMAPHORE_SIGNAL_INFO};
+            info.semaphore = signals[i].semaphore;
+            info.value = signals[i].value;
+            if (vkSignalSemaphore(dev.device, &info) != VK_SUCCESS)
+                replay_fatal("copy fallback completion signal failed");
+        }
+    }
 }
 
 // ---- NVN state (the draw path's, vk_state.h) ----
@@ -1231,6 +1263,7 @@ constexpr int kMaxParts = 32;
 constexpr int kMaxBatch = 6;   // (three recording threads: more segments only took slots and submits)
 
 void maybe_split(VkCommandBuffer& cmd) {
+    if (memory_guest_copy()) return; // Serialized copies gain nothing from overlapping recording chunks.
     static const int64_t every = getenv("RX_VK_CHUNK") ? atoll(getenv("RX_VK_CHUNK")) : 120;
     if (!rec_cur || every <= 0 || ++part_work < every || rec_parts + 1 >= kMaxParts || dump_on()) return;
     end_pass(cmd);
@@ -1253,6 +1286,7 @@ void maybe_split(VkCommandBuffer& cmd) {
 // recorded out of order left one-frame black scenes in play, 48-93 in a walk through Kakariko against none on the
 // replay thread alone, at about the same frame rate here: 36-40 fps against 38-41)
 int par_threads() {
+    if (memory_guest_copy()) return 0;
     static const int n = std::clamp(getenv("RX_VK_PARALLEL") ? atoi(getenv("RX_VK_PARALLEL")) : 0, 0, 8);
     return n;
 }
@@ -1318,17 +1352,6 @@ void record_segment(VkCommandBuffer& cmd, const Segment& g) {
     ub_limit = SIZE_MAX;
 }
 
-/// The replay cannot go on: logged, the host's queued log written out (as hos_fatal does: a device lost's report is many
-/// lines, and the queue went with the process), written to stderr and the process ended (exit code 3). For a parallel
-/// replay's init command buffer that could not be ended: images already made and published lost their first layout
-/// change, and any later submission may use them
-[[noreturn]] void replay_fatal(const char* why) {
-    logf("vk: FATAL: %s", why);
-    if (host && host->log_flush) host->log_flush();
-    std::fprintf(stderr, "vk: FATAL: %s\n", why);
-    std::fflush(stderr);
-    std::_Exit(3);
-}
 std::recursive_mutex par_mu;
 
 /// A command buffer of the submission from h (its start, or where it stopped at a wait): on the replay thread alone
@@ -1775,7 +1798,7 @@ void log_order_stats() {
 bool burst_open = false;
 uint64_t burst_value = 0;
 void burst_begin(uint64_t value) {
-    burst_open = event_waits_on() && !dump_on();
+    burst_open = !memory_guest_copy() && event_waits_on() && !dump_on();
     burst_value = value;
     for (const auto& [queue, q] : qruns) {
         if (q.waiting) burst_value = std::max(burst_value, q.value);
@@ -3389,6 +3412,7 @@ int presents_ahead() {   // (RX_VK_PRESENTS_AHEAD=<n>: how many presents the gam
 }
 
 bool async_on() {
+    if (memory_guest_copy()) return false;
     // (hookshot: off by default. OoT rewrites double-buffered data right after a submit with no fence, which lands
     // inside a replay running behind (TotK Recomp's reason to replay on the submitting thread): whole-screen white or
     // black frames, 28 per 1000 gameplay frames, against 1.3 synchronous, at the same frame rate. RX_VK_ASYNC=1: on)
@@ -3827,3 +3851,4 @@ int64_t par_now_ns() {
 }
 
 } // namespace mkwvk
+

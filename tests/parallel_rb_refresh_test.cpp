@@ -17,6 +17,8 @@
 #include <unordered_map>
 #include <vector>
 #include <algorithm>
+#include <memory>
+#include "../gpu/vk/guest_copy.h"
 
 struct FakeBuf {
     const char* name;
@@ -74,6 +76,15 @@ bool memory_rb_refresh(VkCommandBuffer up);
 std::mutex pools_mu;
 #include "rb_pool.inc"
 std::map<uint64_t, Pool> imported;
+bool guest_copy_mode = false; // This fixture exercises mirrors; copied storage is checked by test_guest_copy.py.
+uint64_t mem_rec_value = 1;
+void wb_pages_note(uint64_t, uint64_t, uint64_t) {}
+Pool* pool_of(uint64_t guest, uint64_t size) {
+    auto it = imported.upper_bound(guest);
+    if (it == imported.begin()) return nullptr;
+    Pool& p = (--it)->second;
+    return guest >= p.lo && guest < p.hi && size <= p.hi - guest ? &p : nullptr;
+}
 uint64_t mirror_epoch = 0;
 bool mirror_upload = false;
 #include "rb_writeback.inc"
@@ -289,3 +300,4 @@ int main(int argc, char** argv) {
     }
     return fails ? 1 : 0;
 }
+

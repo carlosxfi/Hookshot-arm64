@@ -21,6 +21,9 @@ concurrency:
 jobs:
   python:
     name: Python source checks (${{ matrix.os }})
+    permissions:
+      contents: read
+      checks: write
     strategy:
       fail-fast: false
       matrix:
@@ -109,7 +112,30 @@ jobs:
         env:
           HOOKSHOT_SPIRV_HEADERS: ${{ github.workspace }}/_deps/spirv-headers/include
           HOOKSHOT_VULKAN_HEADERS: ${{ github.workspace }}/_deps/vulkan-headers/include
-        run: python -I -B tests/run_all.py --strict
+        shell: bash
+        run: python -I -B tests/run_all.py --strict 2>&1 | tee source-regressions.log
+      - name: Publish failed source check output
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CHECK_NAME: Source regression diagnostics (${{ matrix.os }})
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          path = Path('source-regressions.log')
+          log = path.read_text(errors='replace') if path.exists() else 'Failed before the source checks ran.'
+          failed = re.findall(r'::group::(?:FAIL|TIMEOUT).*?::endgroup::', log, re.S)
+          output = '\n\n'.join(failed) if failed else log[-12000:]
+          payload = {'name': os.environ['CHECK_NAME'], 'head_sha': os.environ['CHECK_SHA'],
+                     'status': 'completed', 'conclusion': 'failure',
+                     'output': {'title': 'Failed source checks', 'summary': 'Game-free regression failure output.',
+                                'text': output[-50000:]}}
+          Path('source-diagnostics.json').write_text(json.dumps(payload))
+          PY
+          gh api --method POST "repos/$GITHUB_REPOSITORY/check-runs" --input source-diagnostics.json > /dev/null
 
   spirv-global16:
     name: SPIR-V global narrow load/store lowering
@@ -217,3 +243,4 @@ jobs:
           tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
       - name: Lint the workflows
         run: '"$RUNNER_TEMP/actionlint" -color'
+

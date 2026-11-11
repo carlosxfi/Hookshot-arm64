@@ -48,6 +48,7 @@
 #include "host_shaders/bc_encoder_comp_spv.h"
 #include "bc_levels.h"
 #include "astc_bc_policy.h"
+#include "texture_storage.h"
 #include "keep_rendered.h"
 #include "target_overlap.h"
 #include "host_shaders/block_linear_unswizzle_2d_comp_spv.h"
@@ -1718,12 +1719,19 @@ Texture* create(const Key& key, const nvn_tex* t, VkFormat vf, bool astc, int bw
                  x.levels, (int)x.format, d.format);
         return nullptr;
     }
-    // what it costs: the level chain's texels
-    uint64_t px = 0;
-    for (uint32_t l = 0; l < x.levels; l++)
-        px += (uint64_t)std::max(1u, x.width >> l) * std::max(1u, x.height >> l) * std::max(1u, x.depth >> l);
-    const uint32_t texel = x.bc || is_bc(x.format) ? 1 : astc ? 4 : std::max(1, from ? (from == 3 ? 4 : from == 6 ? 8 : 16) : bpb);
-    x.bytes = x.sparse ? 0 : px * x.layers * texel * x.samples;   // (a sparse image's: as its layers are bound)
+    // Native ASTC remains compressed on Adreno: bpb is 16 bytes per block, not per texel.
+    // Counting it per texel inflated the terrain arrays by their block area and drove premature eviction.
+    uint32_t cost_bw = 1, cost_bh = 1;
+    uint32_t cost_bpb = astc ? 4 : std::max(1, from ? (from == 3 ? 4 : from == 6 ? 8 : 16) : bpb);
+    if (is_astc(x.format)) {
+        cost_bw = bw, cost_bh = bh, cost_bpb = bpb;
+    } else if (is_bc(x.format)) {
+        cost_bw = cost_bh = 4;
+        cost_bpb = (x.format <= VK_FORMAT_BC1_RGBA_SRGB_BLOCK ||
+                    x.format == VK_FORMAT_BC4_UNORM_BLOCK || x.format == VK_FORMAT_BC4_SNORM_BLOCK) ? 8 : 16;
+    }
+    x.bytes = x.sparse ? 0 : texture_storage::bytes(x.width, x.height, x.depth, x.layers, x.levels,
+                                                  x.samples, cost_bw, cost_bh, cost_bpb);
     // (the budget counts what the allocator gave it: the texels' 8% short of that over a scene's 2000 textures, 3228 MB counted for 3504
     // MB held, and a budget of 4035 MB took 4300. RX_VK_COUNT_BY_ESTIMATE=1: the texels)
     static const bool by_estimate = getenv("RX_VK_COUNT_BY_ESTIMATE") != nullptr;
@@ -2946,7 +2954,11 @@ VkBufferView texel_buffer_view(const nvn_tex* t, const nvn_view* v, bool storage
     if (bpb <= 0) return VK_NULL_HANDLE;
     const uint64_t size = (uint64_t)std::max(1u, t->d.width) * bpb;
     // (a formatted store into it: textures over that memory are uploaded again once the GPU is done)
-    if (storage) texture_gpu_wrote(t->gpu, size);
+    if (storage) {
+        texture_gpu_wrote(t->gpu, size);
+        // Buffer views bypass gpu_buffer_bind, and cached views still need their writes tracked each submit.
+        memory_note_gpu_write(t->gpu, size);
+    }
     static std::unordered_map<uint64_t, VkBufferView> views;
     const uint64_t key = mix(mix(t->gpu, (uint64_t)f << 1 | storage), size);
     auto it = views.find(key);
@@ -3545,3 +3557,4 @@ void texture_read_texels(const nvn_tex* t, unsigned level, unsigned layer0, cons
 }
 
 } // namespace mkwvk
+

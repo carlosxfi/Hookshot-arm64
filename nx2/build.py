@@ -446,18 +446,24 @@ WRITE_TRACK = [] if os.environ.get("RX_SOFT_WRITE_WATCH") == "0" else ["-DA64_WR
 # expression is rounded as written (the exact bodies and FPX1's proofs assume it). RX_MARCH=x86-64: the old baseline
 # (issue 363: a Xeon E5-2667 v2 (Ivy Bridge, no AVX2) built the game and then stopped at its first AVX2 instruction,
 # 0xc000001d. The game is built on the PC it runs on: a CPU without x86-64-v3's features gets x86-64-v2, or x86-64)
-from host_cpu import host_march   # (make_game.py asks it too: the AppImage's renderer)
+from host_cpu import host_march, host_is_arm64   # (make_game.py asks it too: the AppImage's renderer)
 
 MARCH = os.environ.get("RX_MARCH") or host_march()
+ARM64 = host_is_arm64()
+if ARM64 and not LINUX:
+    raise SystemExit("This ARM64 port supports native Linux builds; Windows cross builds are not configured.")
 if MARCH != "x86-64-v3":
-    print("build: this CPU has no AVX2: the game is built for %s (a little slower)" % MARCH, flush=True)
-CPU = ["-march=" + MARCH, "-ffp-contract=off"]
+    print("build: compiling for %s" % MARCH, flush=True)
+CPU = ["-march=" + MARCH, "-ffp-contract=off"] + (["-fsigned-char"] if ARM64 else [])
+ATOMIC_CPU = [] if ARM64 else ["-mcx16"]
+# The runtime's Win32-style volatile synchronization expects acquire/release on ARM64.
+HOST_CPU = ["-fms-volatile"] if ARM64 else []
 
 
 def flags(gen, rt64, opt, polls):
     return target() + CPU + [
         "-I" + rt64, "-I" + gen, "-I" + os.path.join(kit.KIT, "rt"), "-I" + NX2_RT, "-Wno-everything",
-        "-fno-strict-aliasing", "-mcx16", "-" + opt, "-g0", "-mllvm", "-rotation-max-header-size=0",
+        "-fno-strict-aliasing", *ATOMIC_CPU, "-" + opt, "-g0", "-mllvm", "-rotation-max-header-size=0",
         "-ffunction-sections", "-mllvm", "-capture-tracking-max-uses-to-explore=5000"] + \
         (["-DA64_POLLING"] if polls else []) + WRITE_TRACK
 
@@ -725,8 +731,8 @@ def main():
         fp(deps), fp(norm(fl)), fp(norm(hot_fl)), code.hexdigest()[:10],
         sum(1 for x in srcs if os.path.basename(x).startswith("code_"))), flush=True)
     # the runtime: ordinary C at -O2, with its own headers (any host/*.h change rebuilds all of it)
-    host_fl = target() + CPU + (["-I" + POSIX, "-D_GNU_SOURCE"] if LINUX else []) + \
-        ["-I" + HOST, "-I" + rt64, "-I" + gen, "-Wno-everything", "-O2", "-g0", "-mcx16", "-DA64_POLLING"] + WRITE_TRACK
+    host_fl = target() + CPU + HOST_CPU + (["-I" + POSIX, "-D_GNU_SOURCE"] if LINUX else []) + \
+        ["-I" + HOST, "-I" + rt64, "-I" + gen, "-Wno-everything", "-O2", "-g0", *ATOMIC_CPU, "-DA64_POLLING"] + WRITE_TRACK
     host_deps = deps + b"".join(open(os.path.join(HOST, f), "rb").read() for f in sorted(os.listdir(HOST))
                                 if f.endswith(".h"))
     if LINUX:
@@ -779,7 +785,7 @@ def main():
             with open(f, "rb") as src:
                 stamp.update(os.path.relpath(f, vk).replace("\\", "/").encode() + src.read().replace(bytes((13, 10)), bytes((10,))))
         shader_stamp = "-DHOOKSHOT_SHADER_STAMP=0x%sull" % stamp.hexdigest()[:16]
-        vflags = target() + CPU + (["-fPIC", "-I" + POSIX, "-D_GNU_SOURCE"] if LINUX else []) + [   # (hookshot: the replay is the frame's limit now)
+        vflags = target() + CPU + HOST_CPU + (["-fPIC", "-I" + POSIX, "-D_GNU_SOURCE"] if LINUX else []) + [   # (hookshot: the replay is the frame's limit now)
             # (what the code takes for granted, which newer C++ libraries bring in by themselves and older ones do not: issue 48)
             "-include", "algorithm", "-include", "cstdio", "-include", "cstdlib", "-include", "cstring", "-include", "functional",
             "-include", "string", "-include", "vector",
@@ -820,7 +826,7 @@ def main():
             vk_jobs.append((cc, os.path.join(HOST, "mingw_msvc_shims.c"), os.path.join(obj_dir, "vk_ngx_mingw_msvc_shims.o"),
                             target() + ["-O2", "-g0", "-Wno-everything"], b""))
         if LINUX:   # (its own copy of the Win32 calls on POSIX, and the bit of GDI the Insert menu draws text with)
-            cflags = target() + CPU + ["-fPIC", "-O2", "-g0", "-Wno-everything", "-D_GNU_SOURCE", "-I" + POSIX,
+            cflags = target() + CPU + HOST_CPU + ["-fPIC", "-O2", "-g0", "-Wno-everything", "-D_GNU_SOURCE", "-I" + POSIX,
                                        "-I" + os.path.join(kit.HERE, "..", "third_party", "stb")]
             pdeps = tree_headers(POSIX)
             for f in ("win32_posix.c", "gdi_posix.c"):
@@ -998,4 +1004,5 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
+
 

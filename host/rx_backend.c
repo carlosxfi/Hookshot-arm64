@@ -34,6 +34,7 @@ void wgr_nvn_read_texels(const nvn_tex *t, unsigned level, unsigned layer0, cons
 void wgr_nvn_write_texels(const nvn_tex *t, unsigned level, unsigned layer0, const NVNcopyRegion *r,
                           const uint8_t *src, uint64_t row, uint64_t img);
 void wgr_nvn_invalidate(uint64_t gpu, uint64_t size);
+int rx_option(int id, int otherwise);
 
 /* what the Vulkan back end is given */
 uint8_t *hos_guest_base(void);
@@ -444,3 +445,4 @@ void rx_nvn_vmap_changing(uint64_t gpu, uint64_t size) {
 void rx_nvn_pool_created(uint64_t gpu, uint64_t size) {
     if (vk && vk->nvn_pool_created) vk->nvn_pool_created(gpu, size);
 }
+

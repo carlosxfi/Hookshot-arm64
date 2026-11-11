@@ -43,7 +43,8 @@ def march_on_linux(text):
         if path == "/proc/cpuinfo":
             return io.StringIO(text)
         return real_open(path, *args, **kwargs)
-    with mock.patch.object(host_cpu.os, "name", "posix"), mock.patch.object(builtins, "open", fake_open):
+    with mock.patch.object(host_cpu.os, "name", "posix"), mock.patch.object(builtins, "open", fake_open), \
+            mock.patch.object(host_cpu.platform, "machine", return_value="x86_64"):
         return host_cpu.host_march()
 
 
@@ -63,7 +64,8 @@ class HostMarch(unittest.TestCase):
         for present, want in (({38, 40}, "x86-64-v3"), ({38}, "x86-64-v2"), (set(), "x86-64")):
             ctypes = mock.MagicMock()
             ctypes.windll.kernel32 = K32(present)
-            with mock.patch.object(host_cpu.os, "name", "nt"), mock.patch.dict(sys.modules, {"ctypes": ctypes}):
+            with mock.patch.object(host_cpu.os, "name", "nt"), mock.patch.dict(sys.modules, {"ctypes": ctypes}), \
+                    mock.patch.object(host_cpu.platform, "machine", return_value="x86_64"):
                 self.assertEqual(host_cpu.host_march(), want, present)
 
     def test_build_and_appimage_use_it(self):
@@ -80,8 +82,9 @@ class AppImageCheck(unittest.TestCase):
     def setUp(self):
         self.make_game = load("make_game_cpu_test", ROOT / "nx2" / "make_game.py")
 
-    def run_check(self, env, march):
-        fake = mock.MagicMock(host_march=mock.MagicMock(return_value=march))
+    def run_check(self, env, march, arm64=False):
+        fake = mock.MagicMock(host_march=mock.MagicMock(return_value=march),
+                              host_is_arm64=mock.MagicMock(return_value=arm64))
         with mock.patch.dict(os.environ, {}, clear=False), mock.patch.dict(sys.modules, {"host_cpu": fake}), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
             for k in ("HOOKSHOT_VK_PREBUILT", "RX_MARCH"):
@@ -108,6 +111,15 @@ class AppImageCheck(unittest.TestCase):
         env = {"HOOKSHOT_VK_PREBUILT": "/x/hookshot_vk.so", "RX_MARCH": "x86-64-v2"}
         self.assertIsNone(self.run_check(env, "x86-64-v2")[0])
 
+    def test_arm64_rejects_x86_renderer_even_with_march_override(self):
+        for override in ({}, {"RX_MARCH": "armv8-a"}):
+            code, out = self.run_check({"HOOKSHOT_VK_PREBUILT": "/x/hookshot_vk.so", **override}, "armv8-a", arm64=True)
+            self.assertEqual(code, 1)
+            self.assertIn("x86-64", out)
+
+    def test_arm64_source_build_goes_on(self):
+        self.assertIsNone(self.run_check({}, "armv8-a", arm64=True)[0])
+
     def test_checked_before_the_game_is_read(self):
         src = (ROOT / "nx2" / "make_game.py").read_text(encoding="utf-8")
         main = src[src.index("def main("):]
@@ -118,3 +130,4 @@ class AppImageCheck(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
