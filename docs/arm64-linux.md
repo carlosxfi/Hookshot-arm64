@@ -39,6 +39,31 @@ The **ARM64 Linux platform checks** workflow also builds and links `hookshot_vk.
 `RX_VK_ONLY=1 python3 nx2/build.py --standalone --jobs 2` path and pinned Vulkan/SPIR-V headers. This checks CPU
 compilation and link symbols. It does not run Vulkan or establish GPU compatibility.
 
+## Linux GPU-owned shared-memory experiment
+
+The copy fallback can spend tens of milliseconds scanning large writable buffers. A possible alternative is to allocate
+coherent Vulkan memory, export it as a dma-buf, and map those pages at the guest pool's address. This reverses the existing
+udmabuf approach and does not need `/dev/udmabuf`. Android's nx2android uses a similar ownership model through
+`AHardwareBuffer`; this Linux probe uses Vulkan's fd export directly and contains no nx2android source.
+
+Before implementing live guest remapping, run the standalone probe on the target hardware, with the game closed:
+
+```sh
+cd "$HOME/Hookshot-arm64"
+VK_LOADER_DRIVERS_SELECT='*freedreno*,*turnip*' \
+python3 scripts/linux/probe_shared_memory.py Adreno
+```
+
+Run inside the build container so the compiler and Vulkan headers are available. The script uses installed headers or
+the existing `cpm` cache; `VULKAN_HEADERS` can specify another include directory. It builds in a temporary directory,
+selects a hardware GPU (never llvmpipe), checks export support for Hookshot's buffer usages, and verifies CPU-to-GPU and
+GPU-to-CPU visibility through an independently mmapped dma-buf alias over 16 rounds. It does not use `MAP_FIXED`,
+touch a game, or change the renderer. Send the full output, including memory type flags and any error.
+
+A pass establishes only that the basic sharing primitive works. Guest remapping still needs safe synchronization with
+game threads, handling overlapping pools, preserving dirty-page tracking, decommit semantics and mapped-memory lifetime.
+Until those are implemented and tested, gameplay continues using the current copy fallback.
+
 ## Remaining validation
 
 - Build the supported Zelda game version from the user's own files on ARM64 Linux, with a native Clang toolchain
