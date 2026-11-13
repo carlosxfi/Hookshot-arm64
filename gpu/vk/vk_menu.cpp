@@ -36,6 +36,7 @@
 #include "oot_cheat_items.h"
 #include "vk_progress.h"   // (StartupView, version_text: the start-up screen)
 #include "vk_ui.h"
+#include "vk_coop.h"   // (oot-remake-multiplayer: co-op's drawing over the picture)
 #include "vk_menu_keys.h"   // (which gamepad buttons confirm and go back: those A and B are bound to)         // (how it looks: Dear ImGui, vk_imgui.h)
 #include "vk_dlss.h"
 #include "vk_framegen.h"   // (Frame generation by: who makes the frames now, framegen_maker)
@@ -4962,7 +4963,8 @@ void menu_record(VkCommandBuffer cmd, uint32_t index, uint32_t w, uint32_t h) {
     const bool start = startup_on.load(std::memory_order_acquire);
     const bool fps = opts.show_fps && !start;   // (no game frames yet: not "0 FPS" over the start-up screen)
     const bool open = open_now.load(std::memory_order_relaxed);
-    if (!start && !fps && !open) {   // (nothing shows: no ImGui frame, no render pass)
+    const bool coop = !start && coop::wanted();   // (co-op's chat lines and name tags: vk_coop.cpp)
+    if (!start && !fps && !open && !coop) {   // (nothing shows: no ImGui frame, no render pass)
         // (but a new window size or Menu size since the last bake: one frame with nothing drawn that bakes the menu's glyphs
         // and measures its page for the new size, so the next open has no hitch whatever was resized while nothing showed)
         if (prebake_needed(w, h) && ui::begin(w, h)) {
@@ -4985,6 +4987,7 @@ void menu_record(VkCommandBuffer cmd, uint32_t index, uint32_t w, uint32_t h) {
     ui::Ctx c = ui_ctx(w, h);
     prebake(c);   // (the menu's glyphs at this size, before it opens: no hitch then)
     if (start) draw_startup(c);   // (under the menu)
+    if (coop) coop::draw(w, h);   // (under the menu too)
     if (open) draw_menu(c);
     if (fps) draw_fps(c, open);
     ::mkwvk::rec::boundary(::mkwvk::rec::B_DIRECT);   // (Dear ImGui records into cmd directly, its backend through its own pointers: what this thread recorded through vk_work.h reaches cmd first)
@@ -4994,9 +4997,11 @@ void menu_record(VkCommandBuffer cmd, uint32_t index, uint32_t w, uint32_t h) {
 void menu_record_image(VkCommandBuffer cmd, VkImage image, VkImageView view, uint32_t w, uint32_t h) {
     const bool open = open_now.load(std::memory_order_relaxed);
     const bool fps = opts.show_fps && !startup_on.load(std::memory_order_acquire);
-    if (!open && !fps) return;
+    const bool coop = !startup_on.load(std::memory_order_acquire) && coop::wanted();
+    if (!open && !fps && !coop) return;
     if (!ui::begin(w, h)) return;
     ui::Ctx c = ui_ctx(w, h);
+    if (coop) coop::draw(w, h);
     if (open) draw_menu(c);
     if (fps) draw_fps(c, open);
     ::mkwvk::rec::boundary(::mkwvk::rec::B_DIRECT);   // (Dear ImGui records into cmd directly, its backend through its own pointers: what this thread recorded through vk_work.h reaches cmd first)

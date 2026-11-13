@@ -6,6 +6,9 @@
 #pragma once
 #include <stdint.h>
 
+/* Parsed HOS_CONTROLLER: returns 0 for all, a positive SDL ordinal, or a negative value for disabled/invalid. */
+int hos_controller_filter(void);
+
 int hos_sdl_load(void);   /* 3 or 2, the SDL loaded (the first call loads it); 0 when there is none */
 
 enum { HOS_SDL_AUDIO = 0x10, HOS_SDL_VIDEO = 0x20, HOS_SDL_GAMEPAD = 0x2000, HOS_SDL_EVENTS = 0x4000 };   /* (both's) */
@@ -35,7 +38,8 @@ void hos_sdl_icon(void *window, const char *png);   /* (SDL 3.4's PNG loader: no
 enum {
     HOS_SDL_EV_OTHER, HOS_SDL_EV_QUIT, HOS_SDL_EV_CLOSE, HOS_SDL_EV_RESIZED, HOS_SDL_EV_FOCUS_GAINED,
     HOS_SDL_EV_FOCUS_LOST, HOS_SDL_EV_MOUSE_LEAVE, HOS_SDL_EV_KEY_DOWN, HOS_SDL_EV_MOUSE_DOWN, HOS_SDL_EV_MOUSE_MOTION,
-    HOS_SDL_EV_MOUSE_UP, HOS_SDL_EV_MOUSE_WHEEL, HOS_SDL_EV_MOUSE_ENTER
+    HOS_SDL_EV_MOUSE_UP, HOS_SDL_EV_MOUSE_WHEEL, HOS_SDL_EV_MOUSE_ENTER,
+    HOS_SDL_EV_TEXT   /* (oot-remake-multiplayer: typed text, for co-op's chat box) */
 };
 typedef struct {
     int type;
@@ -45,7 +49,9 @@ typedef struct {
     float x, y;             /* (mouse motion, down and up: the cursor in the window, hos_sdl_window_size's units) */
     int button;             /* (mouse down and up: 1 left, 2 middle, 3 right, as SDL numbers them) */
     float wheel;            /* (mouse wheel: notches, up or away from the player positive) */
+    char text[32];          /* (text: UTF-8, NUL-terminated) */
 } HosSdlEvent;
+void hos_sdl_text_input(void *window);   /* text events on (SDL3 starts with them off; SDL2 has them on) */
 int hos_sdl_wait_event(HosSdlEvent *e, int timeout_ms);   /* 1 when there was one */
 int hos_sdl_poll_event(HosSdlEvent *e);
 

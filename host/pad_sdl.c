@@ -20,6 +20,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include "hos_sdl.h"
+#include "controller_selection.h"
 #include "hd_rumble.h"
 #include "hos_motion.h"
 #include "steam_pads.h"
@@ -61,6 +62,25 @@ static struct {
     int motion_only;      /* (host/steam_pads.h) a real Valve pad while a Steam stand-in pad is open: motion, no input */
 } pads[MAX_PADS];
 static uint32_t pads_opened;
+static HosControllerSelection controller_choice;
+
+/* Read once across the SDL and game threads. A selected/missing pad must not fall back to XInput's
+   all-controller merge. An invalid value disables pads, with a diagnostic, rather than leaking input. */
+int hos_controller_filter(void) {
+    static volatile LONG mode = -3;
+    LONG value = InterlockedCompareExchange(&mode, -3, -3);
+    if (value == -3) {
+        const int parsed = hos_controller_parse(getenv("HOS_CONTROLLER"));
+        value = InterlockedCompareExchange(&mode, parsed, -3);
+        if (value == -3) {
+            value = parsed;
+            if (parsed == -2) hos_log("hid: invalid HOS_CONTROLLER; use all, none, or 1..32. Controllers disabled");
+            else if (parsed < 0) hos_log("hid: controllers disabled for this instance (HOS_CONTROLLER)");
+            else if (parsed > 0) hos_log("hid: this instance selects SDL controller %d; XInput fallback disabled", parsed);
+        }
+    }
+    return (int)value;
+}
 static SRWLOCK state_lock = SRWLOCK_INIT;
 static uint64_t state_buttons;
 static int32_t state_stick[4];
@@ -86,6 +106,7 @@ void hos_filter_stick(int16_t x, int16_t y, int zone, int32_t out[2]);   /* nn_h
 
 /* SDL's controller support started; 0 when it could not be */
 static int pads_start(void) {
+    controller_choice.number = hos_controller_filter();
     /* poll in the background, whatever window is in front (nn_hid.c decides when input counts) */
     hos_sdl_hint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
     /* (SDL2: PlayStation pads' rumble asked for; SDL3 turns it on when a rumble is first sent) */
@@ -343,8 +364,15 @@ static void pads_poll(void) {
             int32_t ids[32];
             int opens[32];
             const int nj = hos_sdl_pads_list(ids, opens, 32);
+            const int bound_before = controller_choice.bound;
+            hos_controller_choose(&controller_choice, ids, nj);
+            if (!bound_before && controller_choice.bound)
+                hos_log("hid: controller %d locked to SDL instance %d for this run; restart after reconnecting it",
+                        controller_choice.number, (int)controller_choice.id);
             for (int j = 0; j < nj; j++) {
                 const int32_t id = ids[j];
+                /* Only the chosen pad is opened: input, motion, motor and HD rumble all follow this choice. */
+                if (!hos_controller_accepts(&controller_choice, id)) continue;
                 int have = 0, slot = -1;
                 for (int i = 0; i < MAX_PADS; i++) {
                     if (pads[i].gc && pads[i].id == id) have = 1;

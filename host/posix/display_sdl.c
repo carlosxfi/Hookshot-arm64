@@ -81,6 +81,43 @@ static void pointer_update(uint32_t pressed, int wheel) {
 static uint32_t sdl_button_bit(int b) { return b == 1 ? HOS_MOUSE_LEFT : b == 3 ? HOS_MOUSE_RIGHT : b == 2 ? HOS_MOUSE_MIDDLE : 0; }
 
 /* ---- keys: SDL's scancodes (USB HID usages) as Windows' virtual keys ---- */
+/* (oot-remake-multiplayer) co-op's chat box, cheats panel and their mouse first (host/coop_bridge.c), as host/display.c
+   does on Windows: a key press by virtual-key code, typed text as code points, the cursor as a fraction of the window */
+int hos_coop_key(unsigned vk, int repeat);
+int hos_coop_char(unsigned ch);
+int hos_coop_keys_taken(void);
+int hos_coop_mouse(float fx, float fy, int event);
+static unsigned coop_vk(int sc) {   /* (the keys the chat box and the panel use, as keys_update maps them) */
+    if (sc >= 4 && sc <= 29) return 'A' + (unsigned)(sc - 4);
+    if (sc >= 30 && sc <= 38) return '1' + (unsigned)(sc - 30);
+    if (sc >= 58 && sc <= 69) return VK_F1 + (unsigned)(sc - 58);
+    switch (sc) {
+    case 39: return '0';
+    case 40: case 88: return VK_RETURN;
+    case 41: return VK_ESCAPE;
+    case 42: return VK_BACK;
+    case 43: return VK_TAB;
+    case 44: return VK_SPACE;
+    case 74: return VK_HOME;
+    case 76: return VK_DELETE;
+    case 77: return VK_END;
+    case 79: return VK_RIGHT;
+    case 80: return VK_LEFT;
+    case 81: return VK_DOWN;
+    case 82: return VK_UP;
+    }
+    return 0;
+}
+static void coop_text(const char *s) {   /* (UTF-8 to code points) */
+    for (const unsigned char *t = (const unsigned char *)s; *t;) {
+        unsigned cp = *t++;
+        int more = cp >= 0xF0 ? 3 : cp >= 0xE0 ? 2 : cp >= 0xC0 ? 1 : 0;
+        cp &= more == 3 ? 0x07 : more == 2 ? 0x0F : more == 1 ? 0x1F : 0x7F;
+        for (; more > 0 && (*t & 0xC0) == 0x80; more--) cp = cp << 6 | (*t++ & 0x3F);
+        hos_coop_char(more ? 0xFFFD : cp);
+    }
+}
+
 static void keys_update(void) {
     int n = 0;
     const uint8_t *k = hos_sdl_keys(&n);
@@ -114,6 +151,12 @@ static void keys_update(void) {
 }
 
 /* ---- the window ---- */
+static int coop_mouse(float x, float y, int event) {   /* (oot-remake-multiplayer: co-op's panel; 1 = taken) */
+    int w = 0, h = 0;
+    if (menu_open || !window) return 0;
+    hos_sdl_window_size(window, &w, &h);
+    return w > 0 && h > 0 ? hos_coop_mouse(x / (float)w, y / (float)h, event) : 0;
+}
 static volatile int renderer;   /* the renderer presents into the window */
 static HANDLE renderer_up;   /* (set once rx_start has returned, ready or not: hos_renderer_wait) */
 static int fullscreen;
@@ -280,6 +323,7 @@ void hos_display_loop(void) {
         ExitProcess(1);
     }
     vk_window.window = window;
+    hos_sdl_text_input(window);   /* (oot-remake-multiplayer: co-op's chat box gets typed text) */
     hos_posix_window[0] = 1;
     {   /* the window's icon: hookshot.png beside the game (make_game.py puts it there), for X11 and the compositors that
            take one from the window; the others find it through the menu entry */
@@ -335,6 +379,11 @@ void hos_display_loop(void) {
                     ptr_in = 1;
                     break;
                 case HOS_SDL_EV_KEY_DOWN: {
+                    const unsigned cvk = coop_vk(e.scancode);   /* (oot-remake-multiplayer: co-op's keys first) */
+                    if (cvk && hos_coop_key(cvk, e.repeat)) {
+                        if (mouse_captured && hos_coop_keys_taken()) mouse_capture(0);   /* (the cursor back, for clicks) */
+                        break;
+                    }
                     const int scancode = e.scancode, mod = e.mod;
                     if (e.scancode == 41) {   /* Esc (it may open the Insert menu too: the capture comes back) */
                         if (!menu_open && mouse_captured) esc_had_capture = 1;
@@ -347,6 +396,7 @@ void hos_display_loop(void) {
                     ptr_in = 1;
                     ptr_held |= sdl_button_bit(e.button);
                     if (menu_open) pointer_publish_at(e.x, e.y, sdl_button_bit(e.button), 0);   /* (the menu's click) */
+                    else if (e.button == 1 && !mouse_captured && coop_mouse(e.x, e.y, 1)) {}   /* (taken by co-op's panel) */
                     else if (renderer && !mouse_captured) mouse_capture(1);
                     break;
                 case HOS_SDL_EV_MOUSE_UP:
@@ -354,9 +404,17 @@ void hos_display_loop(void) {
                     break;
                 case HOS_SDL_EV_MOUSE_WHEEL:
                     if (menu_open) pointer_update(0, (int)(e.wheel * 120));
+                    else if (!mouse_captured && e.wheel != 0) {   /* (oot-remake-multiplayer: co-op's panel) */
+                        float x = 0, y = 0;
+                        hos_sdl_mouse_position(&x, &y);
+                        coop_mouse(x, y, e.wheel > 0 ? 2 : 3);
+                    }
+                    break;
+                case HOS_SDL_EV_TEXT:   /* (oot-remake-multiplayer: typed text for co-op's chat box and panel) */
+                    coop_text(e.text);
                     break;
                 case HOS_SDL_EV_MOUSE_MOTION:
-                    if (!mouse_captured) ptr_in = 1;
+                    if (!mouse_captured) ptr_in = 1, coop_mouse(e.x, e.y, 0);   /* (co-op: the row under the cursor) */
                     if (mouse_captured) {   /* (SDL3's motion comes in fractions of a pixel: the remainders kept for the next) */
                         static float rx, ry;
                         rx += e.dx, ry += e.dy;

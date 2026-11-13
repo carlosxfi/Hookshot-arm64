@@ -1,0 +1,321 @@
+diff --git a/host/controller_selection.h b/host/controller_selection.h
+new file mode 100644
+index 0000000..3b3b986
+--- /dev/null
++++ b/host/controller_selection.h
+@@ -0,0 +1,36 @@
++/* Per-process controller choice. Ordinals lock to one SDL instance for the run: unplugging a
++   different pad must never make this game start reading its neighbour. No SDL or OS dependencies. */
++#ifndef HOS_CONTROLLER_SELECTION_H
++#define HOS_CONTROLLER_SELECTION_H
++#include <stdint.h>
++#include <string.h>
++
++/* 0: legacy all-controller merge; -1: none; -2: invalid (also none); 1..32: SDL ordinal. */
++static inline int hos_controller_parse(const char *text) {
++    if (!text || !*text || !strcmp(text, "all")) return 0;
++    if (!strcmp(text, "none") || !strcmp(text, "0")) return -1;
++    unsigned n = 0;
++    for (const unsigned char *p = (const unsigned char *)text; *p; ++p) {
++        if (*p < '0' || *p > '9' || n > 32) return -2;
++        n = n * 10 + (*p - '0');
++    }
++    return n >= 1 && n <= 32 ? (int)n : -2;
++}
++
++typedef struct HosControllerSelection {
++    int number, bound;
++    int32_t id;
++} HosControllerSelection;
++
++/* Called only by SDL's polling thread, with the full recognised-gamepad list. */
++static inline void hos_controller_choose(HosControllerSelection *choice, const int32_t *ids, int count) {
++    if (choice->number > 0 && !choice->bound && choice->number <= count) {
++        choice->id = ids[choice->number - 1];
++        choice->bound = 1;
++    }
++}
++
++static inline int hos_controller_accepts(const HosControllerSelection *choice, int32_t id) {
++    return choice->number == 0 || (choice->number > 0 && choice->bound && choice->id == id);
++}
++#endif
+diff --git a/host/hos_sdl.h b/host/hos_sdl.h
+index 35339cf..d0c964b 100644
+--- a/host/hos_sdl.h
++++ b/host/hos_sdl.h
+@@ -6,6 +6,9 @@
+ #pragma once
+ #include <stdint.h>
+ 
++/* Parsed HOS_CONTROLLER: returns 0 for all, a positive SDL ordinal, or a negative value for disabled/invalid. */
++int hos_controller_filter(void);
++
+ int hos_sdl_load(void);   /* 3 or 2, the SDL loaded (the first call loads it); 0 when there is none */
+ 
+ enum { HOS_SDL_AUDIO = 0x10, HOS_SDL_VIDEO = 0x20, HOS_SDL_GAMEPAD = 0x2000, HOS_SDL_EVENTS = 0x4000 };   /* (both's) */
+diff --git a/host/nn_hid.c b/host/nn_hid.c
+index 054caa5..8e7060b 100644
+--- a/host/nn_hid.c
++++ b/host/nn_hid.c
+@@ -25,6 +25,7 @@
+    Npad states share one layout (NpadCommonState): { s64 sampling; u64 buttons; s32 lx, ly; s32 rx, ry; u32 attributes;
+    pad } = 0x28 bytes. */
+ #include "hos.h"
++#include "hos_sdl.h"
+ #include "hos_paths.h"
+ #include "control.h"
+ #include <math.h>
+@@ -736,7 +737,9 @@ static void pads_read(uint64_t *buttons, int32_t stick[4]) {
+        Only poll XInput when SDL has no open controllers, unless HOS_XINPUT=1 is explicitly requested. */
+     static int poll_xinput_env = -1;
+     if (poll_xinput_env < 0) poll_xinput_env = env_on("HOS_XINPUT");
+-    if (!sdl_pads || poll_xinput_env) {
++    /* An explicit SDL selection never admits a second controller through XInput, even when the selected
++       pad is absent, SDL failed, or HOS_XINPUT=1 was inherited from another launch. */
++    if (hos_controller_filter() == 0 && (!sdl_pads || poll_xinput_env)) {
+         if (!xinput_get) {
+             static int64_t load_retry;
+             if (now >= load_retry) {
+diff --git a/host/pad_sdl.c b/host/pad_sdl.c
+index f6ad2c5..4acbd18 100644
+--- a/host/pad_sdl.c
++++ b/host/pad_sdl.c
+@@ -20,6 +20,7 @@
+ #define WIN32_LEAN_AND_MEAN
+ #include <windows.h>
+ #include "hos_sdl.h"
++#include "controller_selection.h"
+ #include "hd_rumble.h"
+ #include "hos_motion.h"
+ #include "steam_pads.h"
+@@ -61,6 +62,25 @@ static struct {
+     int motion_only;      /* (host/steam_pads.h) a real Valve pad while a Steam stand-in pad is open: motion, no input */
+ } pads[MAX_PADS];
+ static uint32_t pads_opened;
++static HosControllerSelection controller_choice;
++
++/* Read once across the SDL and game threads. A selected/missing pad must not fall back to XInput's
++   all-controller merge. An invalid value disables pads, with a diagnostic, rather than leaking input. */
++int hos_controller_filter(void) {
++    static volatile LONG mode = -3;
++    LONG value = InterlockedCompareExchange(&mode, -3, -3);
++    if (value == -3) {
++        const int parsed = hos_controller_parse(getenv("HOS_CONTROLLER"));
++        value = InterlockedCompareExchange(&mode, parsed, -3);
++        if (value == -3) {
++            value = parsed;
++            if (parsed == -2) hos_log("hid: invalid HOS_CONTROLLER; use all, none, or 1..32. Controllers disabled");
++            else if (parsed < 0) hos_log("hid: controllers disabled for this instance (HOS_CONTROLLER)");
++            else if (parsed > 0) hos_log("hid: this instance selects SDL controller %d; XInput fallback disabled", parsed);
++        }
++    }
++    return (int)value;
++}
+ static SRWLOCK state_lock = SRWLOCK_INIT;
+ static uint64_t state_buttons;
+ static int32_t state_stick[4];
+@@ -86,6 +106,7 @@ void hos_filter_stick(int16_t x, int16_t y, int zone, int32_t out[2]);   /* nn_h
+ 
+ /* SDL's controller support started; 0 when it could not be */
+ static int pads_start(void) {
++    controller_choice.number = hos_controller_filter();
+     /* poll in the background, whatever window is in front (nn_hid.c decides when input counts) */
+     hos_sdl_hint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
+     /* (SDL2: PlayStation pads' rumble asked for; SDL3 turns it on when a rumble is first sent) */
+@@ -343,8 +364,15 @@ static void pads_poll(void) {
+             int32_t ids[32];
+             int opens[32];
+             const int nj = hos_sdl_pads_list(ids, opens, 32);
++            const int bound_before = controller_choice.bound;
++            hos_controller_choose(&controller_choice, ids, nj);
++            if (!bound_before && controller_choice.bound)
++                hos_log("hid: controller %d locked to SDL instance %d for this run; restart after reconnecting it",
++                        controller_choice.number, (int)controller_choice.id);
+             for (int j = 0; j < nj; j++) {
+                 const int32_t id = ids[j];
++                /* Only the chosen pad is opened: input, motion, motor and HD rumble all follow this choice. */
++                if (!hos_controller_accepts(&controller_choice, id)) continue;
+                 int have = 0, slot = -1;
+                 for (int i = 0; i < MAX_PADS; i++) {
+                     if (pads[i].gc && pads[i].id == id) have = 1;
+diff --git a/tests/test_controller_selection.py b/tests/test_controller_selection.py
+new file mode 100644
+index 0000000..4b8c0f4
+--- /dev/null
++++ b/tests/test_controller_selection.py
+@@ -0,0 +1,174 @@
++"""Compile the real SDL poll with three fake controllers; isolate input, rumble and gyro candidates."""
++import os
++from pathlib import Path
++import re
++import shutil
++import subprocess
++import tempfile
++import unittest
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def function(source, marker):
++    start = source.index(marker)
++    at = source.index("{", start)
++    depth = 0
++    for end in range(at, len(source)):
++        depth += (source[end] == "{") - (source[end] == "}")
++        if depth == 0:
++            return source[start:end + 1]
++    raise AssertionError(marker)
++
++
++class ControllerSelection(unittest.TestCase):
++    def test_real_poll(self):
++        pad = (ROOT / "host/pad_sdl.c").read_text()
++        hid = (ROOT / "host/nn_hid.c").read_text()
++        # Compile the actual XInput eligibility expression too: no fallback for selected/missing/invalid pads.
++        gate = re.search(r"if \((hos_controller_filter\(\) == 0 && \(!sdl_pads \|\| poll_xinput_env\))\) \{", hid)
++        self.assertIsNotNone(gate)
++        self.assertIn("controller_choice.number = hos_controller_filter();", function(pad, "static int pads_start("))
++        structs = pad[pad.index("static struct {"):pad.index("static uint32_t pads_opened;")]
++        enums = pad[pad.index("enum { BTN_A"):pad.index("#define MAX_PADS")]
++        fixture = r'''
++#include <assert.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <stdint.h>
++#include <string.h>
++#include "host/controller_selection.h"
++#include "host/hd_rumble.h"
++#include "host/steam_pads.h"
++#include "gpu/vk/vk_api.h"
++ENUMS
++#define MAX_PADS 8
++STRUCTS
++static HosControllerSelection controller_choice;
++static uint32_t pads_opened;
++static uint64_t state_buttons;
++static int32_t state_stick[4];
++static int state_count, state_lock, hd_lock;
++static char state_name[128];
++static unsigned rumble_low=100, rumble_high=200;
++static float hd_values[2][4];
++static int seen[3], motors[3], effects[3], sensors[3], movement;
++static int nlist=3, order[3]={0,1,2}, disconnected=-1;
++static int64_t clock_ns=1000000000LL;
++static int fake_gc[3];
++static int index_of(void *gc) { int i=(int)((int *)gc-fake_gc); assert(i>=0 && i<3); return i; }
++static void hos_log(const char *format, ...) { (void)format; }
++static int64_t hos_now_ns(void) { return clock_ns; }
++static void hos_sdl_pads_update(void) {}
++static int hos_sdl_pad_connected(void *gc) { return index_of(gc)!=disconnected; }
++static const char *hos_sdl_pad_name(void *gc) { (void)gc; return "identically named pad"; }
++static void hos_sdl_pad_close(void *gc) { (void)gc; }
++static int hos_sdl_pads_list(int32_t *ids, int *opens, int cap) {
++    assert(cap>=nlist);
++    for (int j=0;j<nlist;j++) ids[j]=11+11*order[j], opens[j]=order[j];
++    return nlist;
++}
++static void *hos_sdl_pad_open(int i) { seen[i]++; return &fake_gc[i]; }
++static int32_t hos_sdl_pad_id(void *gc) { return 11+11*index_of(gc); }
++enum { HOS_SDL_SENSOR_ACCEL=1, HOS_SDL_SENSOR_GYRO=2 };
++static int hos_sdl_pad_has_sensor(void *gc, int sensor) { (void)sensor; sensors[index_of(gc)]++; return 1; }
++static unsigned hos_sdl_pad_vendor(void *gc) { (void)gc; return 0; }
++static uint64_t hos_sdl_pad_steam_handle(void *gc) { (void)gc; return 0; }
++static void hos_sdl_pad_log_connection(void *gc, int motion, int steam) { (void)gc; (void)motion; (void)steam; }
++static int hos_sdl_pad_button(void *gc, int button) { return button==index_of(gc); }
++static int16_t hos_sdl_pad_axis(void *gc, int axis) { return axis==AX_LX && movement ? (int16_t)(10000+1000*index_of(gc)) : 0; }
++static int rx_option(int id, int fallback) { (void)id; return fallback; }
++static void hos_filter_stick(int16_t x, int16_t y, int zone, int32_t *out) { (void)zone; out[0]=x; out[1]=y; }
++static void hd_open(int i, void *gc) { (void)i; (void)gc; }
++static int use_hd;
++static int hd_poll(int i, const uint8_t side[3][4], int64_t now) {
++    (void)side; (void)now;
++    if (use_hd) effects[index_of(pads[i].gc)]++;
++    return use_hd;
++}
++static void hos_sdl_pad_rumble(void *gc, uint16_t lo, uint16_t hi, uint32_t ms) {
++    assert(lo && hi && ms); motors[index_of(gc)]++;
++}
++static void motion_only_used(int i, int64_t now) { (void)i; (void)now; }
++static void motion_poll(int64_t now, int count) { (void)now; (void)count; }
++#define AcquireSRWLockShared(p) ((void)(p))
++#define ReleaseSRWLockShared(p) ((void)(p))
++#define AcquireSRWLockExclusive(p) ((void)(p))
++#define ReleaseSRWLockExclusive(p) ((void)(p))
++RUMBLE_DUE
++RUMBLE_STRENGTH
++POLL
++typedef int32_t LONG;
++static const char *selection_text;
++static const char *fake_getenv(const char *name) { assert(!strcmp(name,"HOS_CONTROLLER")); return selection_text; }
++static LONG InterlockedCompareExchange(volatile LONG *p, LONG value, LONG expected) {
++    return __sync_val_compare_and_swap(p,expected,value);
++}
++#define getenv fake_getenv
++FILTER
++#undef getenv
++static int mode;
++static int xinput_allowed(int sdl_pads, int poll_xinput_env) { return GATE; }
++int main(int argc, char **argv) {
++    assert(argc==2);
++    assert(hos_controller_parse(NULL)==0 && hos_controller_parse("")==0 && hos_controller_parse("all")==0);
++    assert(hos_controller_parse("none")==-1 && hos_controller_parse("0")==-1);
++    assert(hos_controller_parse("32")==32 && hos_controller_parse("01")==1);
++    const char *bad[]={"-1","+1","1junk"," 1","1 ","33","999999999999999999999","All","00"};
++    for (unsigned i=0;i<sizeof bad/sizeof *bad;i++) assert(hos_controller_parse(bad[i])==-2);
++    selection_text=argv[1]; mode=hos_controller_parse(argv[1]); controller_choice.number=mode;
++    assert(hos_controller_filter()==mode);
++    selection_text="all"; assert(hos_controller_filter()==mode); // immutable process choice
++    for (int s=0;s<2;s++) for (int force=0;force<2;force++)
++        assert(xinput_allowed(s,force)==(mode==0 && (!s || force)));
++    pads_poll(); // sticks first seen at rest
++    movement=1; clock_ns+=2000000000LL; pads_poll();
++    int expected_count=mode==0?3:mode>0 && mode<=3?1:0;
++    assert(state_count==expected_count);
++    uint64_t buttons=0;
++    for (int i=0;i<3;i++) {
++        int selected=mode==0 || mode==i+1;
++        assert(seen[i]==selected);
++        assert((motors[i]>0)==selected);
++        assert((sensors[i]>0)==selected); // only the selected pad is offered to gyro setup
++        if (selected) buttons|=1ull<<i;
++    }
++    assert(state_buttons==buttons);
++    assert(state_stick[0]==(expected_count?(mode==0?12000:10000+1000*(mode-1)):0));
++    use_hd=1; clock_ns+=2000000000LL; pads_poll();
++    for (int i=0;i<3;i++) assert((effects[i]>0)==(mode==0 || mode==i+1));
++    if (mode==2) {
++        // Unplug selected pad, reorder the identical neighbours: no reassignment and neutral output.
++        disconnected=1; nlist=2; order[0]=2; order[1]=0; clock_ns+=2000000000LL; pads_poll();
++        assert(state_count==0 && state_buttons==0 && state_stick[0]==0);
++        assert(seen[0]==0 && seen[2]==0);
++        assert(controller_choice.bound && controller_choice.id==22);
++    }
++    if (mode==4) {
++        // A missing ordinal never opens an unrelated device or falls through to XInput.
++        assert(!controller_choice.bound);
++        order[0]=2; order[1]=0; clock_ns+=2000000000LL; pads_poll();
++        assert(state_count==0 && !state_buttons);
++    }
++}
++'''
++        for key, value in {"ENUMS": enums, "STRUCTS": structs,
++                           "RUMBLE_DUE": function(pad, "static int rumble_due("),
++                           "RUMBLE_STRENGTH": function(pad, "static void rumble_strength("),
++                           "POLL": function(pad, "static void pads_poll("), "GATE": gate.group(1),
++                           "FILTER": function(pad, "int hos_controller_filter(")}.items():
++            fixture = fixture.replace(key, value)
++        cc = os.environ.get("CC") or shutil.which("cc")
++        self.assertIsNotNone(cc)
++        with tempfile.TemporaryDirectory(prefix="controller-selection-") as tmp:
++            source, binary = Path(tmp) / "test.c", Path(tmp) / "test.exe"
++            source.write_text(fixture)
++            subprocess.run([cc, "-std=c11", "-Wall", "-Wextra", "-Werror", "-I", str(ROOT),
++                            str(source), "-lm", "-o", str(binary)], check=True)
++            for value in ("all", "1", "2", "3", "4", "none", "invalid", "0"):
++                subprocess.run([str(binary), value], check=True, timeout=10)
++
++
++if __name__ == "__main__":
++    unittest.main()

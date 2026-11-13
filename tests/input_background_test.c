@@ -6,6 +6,9 @@
 #include <string.h>
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL:%d %s\n", __LINE__, #x); exit(1); } } while (0)
 #include "input_constants.inc"
+/* The test10 co-op bridge owns these symbols in a game. No chat is open in this input fixture. */
+static volatile uint64_t hos_coop_pad;
+int hos_coop_keys_taken(void) { return 0; }
 /* API spies must not collide with Windows SDK/import-library names. */
 #define GetCurrentProcessId fixture_GetCurrentProcessId
 #define InterlockedCompareExchange64 fixture_InterlockedCompareExchange64

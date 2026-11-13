@@ -25,6 +25,7 @@ static struct {
     void *PadVendor, *PadSteamHandle, *SetHintPriority;   /* (Steam's stand-in pads: optional, host/steam_pads.h) */
     void *JoystickGUID, *PadMapping;   /* (optional connection diagnostics: no serial number or device path) */
     void *GetGamepads, *GetGamepadID, *Free;   /* (SDL3) */
+    void *StartTextInput;   /* (optional: co-op's chat box, hos_sdl_text_input) */
     void *NumJoysticks, *IsGameController, *DeviceInstanceID, *GetJoystick, *JoystickInstanceID;   /* (SDL2; GetJoystick also SDL3's diagnostics) */
 } f;
 #define CALL(type, fn) ((type)f.fn)
@@ -80,6 +81,7 @@ static int get_all(HMODULE m, int three) {
     *(FARPROC *)&f.SetHintPriority = GetProcAddress(m, "SDL_SetHintWithPriority");
     *(FARPROC *)&f.JoystickGUID = GetProcAddress(m, three ? "SDL_GetJoystickGUID" : "SDL_JoystickGetGUID");
     *(FARPROC *)&f.PadMapping = GetProcAddress(m, three ? "SDL_GetGamepadMapping" : "SDL_GameControllerMapping");
+    *(FARPROC *)&f.StartTextInput = GetProcAddress(m, "SDL_StartTextInput");
     if (three) {
         *(FARPROC *)&f.GetJoystick = GetProcAddress(m, "SDL_GetGamepadJoystick");   /* (optional: diagnostics only) */
         GET(SetWindowPosition, "SDL_SetWindowPosition");
@@ -244,6 +246,11 @@ void hos_sdl_mouse_position(float *x, float *y) {
         *x = (float)ix, *y = (float)iy;
     }
 }
+void hos_sdl_text_input(void *window) {
+    if (!f.StartTextInput) return;
+    if (version == 3) CALL(_Bool (*)(void *), StartTextInput)(window);
+    else CALL(void (*)(void), StartTextInput)();
+}
 void hos_sdl_window_size(void *window, int *width, int *height) {
     if (version == 3) CALL(_Bool (*)(void *, int *, int *), GetWindowSize)(window, width, height);
     else CALL(void (*)(void *, int *, int *), GetWindowSize)(window, width, height);
@@ -287,6 +294,13 @@ static void read_event(const uint8_t *raw, HosSdlEvent *e) {
             if (dir == 1) e->wheel = -e->wheel;
             break;
         }
+        case 0x303: {   /* (SDL_TextInputEvent: the text's pointer at 24, SDL's until the next poll: copied) */
+            const char *t;
+            memcpy(&t, raw + 24, sizeof t);
+            e->type = HOS_SDL_EV_TEXT;
+            if (t) snprintf(e->text, sizeof e->text, "%s", t);
+            break;
+        }
         }
         return;
     }
@@ -320,6 +334,10 @@ static void read_event(const uint8_t *raw, HosSdlEvent *e) {
         e->wheel = (float)(dir == 1 ? -i[0] : i[0]);
         break;
     }
+    case 0x303:   /* (SDL_TextInputEvent: the text at 12, 32 bytes) */
+        e->type = HOS_SDL_EV_TEXT;
+        memcpy(e->text, raw + 12, sizeof e->text - 1);
+        break;
     }
 }
 int hos_sdl_wait_event(HosSdlEvent *e, int timeout_ms) {

@@ -2512,6 +2512,8 @@ NV(nvnQueuePresentTexture) {
     extern volatile LONG64 hos_present_count;   /* display.c */
     InterlockedIncrement64(&hos_present_count);
     hos_vi_native_presented(phases);
+    void hos_coop_present(void);   /* (oot-remake-multiplayer, coop_bridge.c: co-op's per-present work) */
+    hos_coop_present();
 }
 
 /* ---- NVN2 (mkw-recomp): what the Switch 2's NVN adds, as MKW uses it ---- */

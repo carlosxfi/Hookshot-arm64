@@ -39,6 +39,7 @@
 #include "upscaler_rows.h"    // (upscale_lod_bias: which upscalers draw the 3D smaller)
 #include "dlss_actor.h"
 #include "vk_temporal.h"
+#include "vk_coop.h"   // (oot-remake-multiplayer: the camera for co-op's name tags)
 #include "vk_fsr3.h"          // (AMD FSR 3.1 in the gameplay upscale's place)
 #include "vk_fsr3_inputs.h"
 #include "reactive_policy.h"
@@ -6667,6 +6668,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
     // FSR 3.1 (vk_fsr3_inputs.cpp). The vertex stage's uniform buffer 3 (NVN's binding 0)
     if (at.n && at.color[0] && at.depth) {
         temporal_note_scene_draw(at.color[0], at.width, at.height, at.depth, s.ubo[0][0].addr, s.ubo[0][0].size);
+        coop::note_scene_draw(at.color[0], at.width, at.height, s.ubo[0][0].addr, s.ubo[0][0].size);   // (oot-remake-multiplayer: name tags)
         fsr3_inputs::note_scene_draw(at.color[0], at.width, at.height, at.depth, s.ubo[0][0].addr, s.ubo[0][0].size);
     }
     uint8_t types[8];

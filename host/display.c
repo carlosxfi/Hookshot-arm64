@@ -266,11 +266,21 @@ static void menu_press(HWND w, LPARAM lp, LONG bit) {   /* (a click while the me
     pointer_publish_at(w, at, (uint32_t)bit, 0);
 }
 
+/* (oot-remake-multiplayer) the cursor for co-op's cheats panel first (coop_bridge.c), while no menu has the mouse:
+   at (client pixels) as a fraction of the client area; 1 = taken */
+static int coop_mouse(HWND w, POINT at, int event) {
+    extern int hos_coop_mouse(float fx, float fy, int event);
+    RECT rc;
+    if (menu_open || game_menu_open || !GetClientRect(w, &rc) || rc.right <= 0 || rc.bottom <= 0) return 0;
+    return hos_coop_mouse((float)at.x / (float)rc.right, (float)at.y / (float)rc.bottom, event);
+}
+
 static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
     case WM_MOUSEMOVE: {
         if (mouse_captured) return 0;
         const int x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+        coop_mouse(w, (POINT){x, y}, 0);   /* (oot-remake-multiplayer: the row under the cursor) */
         if (game_menu_open && !menu_open && (x != gm_mx || y != gm_my)) {   /* (a move: not a repeat at rest) */
             gm_mx = x, gm_my = y;
             gm_mouse_used();
@@ -286,7 +296,11 @@ static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         pointer_tracking = 0;
         pointer_update(w, 0, 0);
         return 0;
-    case WM_MOUSEWHEEL:
+    case WM_MOUSEWHEEL: {   /* (oot-remake-multiplayer: the cheats panel's wheel first) */
+        POINT at = {(short)LOWORD(lp), (short)HIWORD(lp)};
+        ScreenToClient(w, &at);
+        if (coop_mouse(w, at, GET_WHEEL_DELTA_WPARAM(wp) > 0 ? 2 : 3)) return 0;
+    }
         if (menu_open || game_menu_open) pointer_update(w, 0, GET_WHEEL_DELTA_WPARAM(wp));   /* (hidden or not) */
         else if ((LONG64)hos_now_ns() - InterlockedCompareExchange64(&play_wheel_ns, 0, 0) < 200000000LL)
             InterlockedExchangeAdd(&play_wheel, GET_WHEEL_DELTA_WPARAM(wp));   /* (a screen that takes the wheel only) */
@@ -354,11 +368,23 @@ static LRESULT CALLBACK wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
         return DefWindowProcA(w, msg, wp, lp);
     }
     case WM_LBUTTONDOWN:
+        if (coop_mouse(w, (POINT){(short)LOWORD(lp), (short)HIWORD(lp)}, 1)) return 0;   /* (oot-remake-multiplayer) */
         if (menu_open) menu_press(w, lp, HOS_MOUSE_LEFT);
         else if (game_menu_open) game_menu_press(lp, HOS_MOUSE_LEFT);
         else if (renderer && !mouse_captured) mouse_capture(w, 1);
         return 0;
+    case WM_CHAR: {   /* (oot-remake-multiplayer: co-op's chat box, coop_bridge.c) */
+        extern int hos_coop_char(unsigned ch);
+        if (hos_coop_char((unsigned)wp)) return 0;
+        break;
+    }
     case WM_KEYDOWN: {
+        extern int hos_coop_key(unsigned key, int repeat);   /* (oot-remake-multiplayer: the chat box's keys first) */
+        if (hos_coop_key((unsigned)wp, (lp & (1 << 30)) != 0)) {
+            extern int hos_coop_keys_taken(void);   /* (the chat box or cheats opened: the cursor back, for clicks) */
+            if (mouse_captured && hos_coop_keys_taken()) mouse_capture(w, 0);
+            return 0;
+        }
         extern void hos_vk_note_key_press(unsigned key);
         if (!(lp & (1 << 30))) hos_vk_note_key_press((unsigned)wp);
         if (wp == VK_ESCAPE) {   /* (it may open the Insert menu too: a capture let go here comes back) */

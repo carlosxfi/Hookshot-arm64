@@ -25,6 +25,7 @@
    Npad states share one layout (NpadCommonState): { s64 sampling; u64 buttons; s32 lx, ly; s32 rx, ry; u32 attributes;
    pad } = 0x28 bytes. */
 #include "hos.h"
+#include "hos_sdl.h"
 #include "hos_paths.h"
 #include "control.h"
 #include <math.h>
@@ -52,7 +53,8 @@ static int64_t sampling;
 
 int rx_option(int id, int otherwise);
 /* (the Insert menu takes the keyboard while it is open) */
-static int key(int vk) { return !rx_option(1, 0) && (GetAsyncKeyState(vk) & 0x8000) != 0; }
+int hos_coop_keys_taken(void);   /* (oot-remake-multiplayer, coop_bridge.c: co-op's chat box has the keyboard) */
+static int key(int vk) { return !rx_option(1, 0) && !hos_coop_keys_taken() && (GetAsyncKeyState(vk) & 0x8000) != 0; }
 
 int hos_mouse_take(int32_t *dx, int32_t *dy);   /* display.c */
 
@@ -735,7 +737,9 @@ static void pads_read(uint64_t *buttons, int32_t stick[4]) {
        Only poll XInput when SDL has no open controllers, unless HOS_XINPUT=1 is explicitly requested. */
     static int poll_xinput_env = -1;
     if (poll_xinput_env < 0) poll_xinput_env = env_on("HOS_XINPUT");
-    if (!sdl_pads || poll_xinput_env) {
+    /* An explicit SDL selection never admits a second controller through XInput, even when the selected
+       pad is absent, SDL failed, or HOS_XINPUT=1 was inherited from another launch. */
+    if (hos_controller_filter() == 0 && (!sdl_pads || poll_xinput_env)) {
         if (!xinput_get) {
             static int64_t load_retry;
             if (now >= load_retry) {
@@ -1045,6 +1049,7 @@ static void read_input(uint64_t *buttons, int32_t stick[4]) {
 
 static void vibration_send(uint64_t handle, uint64_t value);
 volatile int64_t hos_hid_last_read;
+volatile uint64_t hos_coop_pad;   /* (oot-remake-multiplayer, coop_bridge.c: player 1's word as the game got it) */
 
 /* GetNpadStates(State* out, int count, unsigned int const& npadId): the latest state first */
 static void npad_states(Ctx *c) {
@@ -1104,11 +1109,13 @@ static void npad_states(Ctx *c) {
     uint64_t hos_frame_step_buttons(uint64_t buttons);   /* nn_vi.c: the frame step of the wheel and quick menus */
     if (connected) buttons = hos_frame_step_buttons(buttons);
     int64_t s = ++sampling;
+    const uint64_t word = oc_pad_word(buttons);   /* (while the game waits for a note button, the five are the controls: oc_notes) */
+    if (connected) __atomic_store_n(&hos_coop_pad, word, __ATOMIC_RELAXED);
     for (int i = 0; i < count; i++) {
         uint64_t e = out + (uint64_t)i * STATE_SIZE;
         memset(GP(e), 0, STATE_SIZE);
         G64(e) = (uint64_t)(s - i);
-        G64(e + 8) = oc_pad_word(buttons);   /* (while the game waits for a note button, the five are the controls: oc_notes) */
+        G64(e + 8) = word;
         memcpy(GP(e + 16), stick, 16);
         G32(e + 32) = connected ? ATTR_CONNECTED : 0;
     }

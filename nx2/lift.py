@@ -175,6 +175,8 @@ def main():
         oot_jitter.install(L, img)
         import oot_occlusion   # (no occlusion queries when HOOKSHOT_OCCLUSION_OFF=1: Fritchii's Occlusion Off)
         oot_occlusion.install(L, img)
+        import coop_hooks   # (oot-remake-multiplayer: co-op's frame hook and AI hold, host/coop_bridge.c)
+        coop_hooks.install(L, img, next((m["build_id"] for m in meta["modules"] if m["name"] == "main"), ""))
     L.discover(max_insns=a.max_func)
     print("discovered %d functions (%.0fs)" % (len(L.funcs), time.time() - t0))
     last[0] = time.time()
